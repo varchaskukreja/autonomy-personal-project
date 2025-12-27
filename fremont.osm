@@ -2,6 +2,6 @@
   <union>
     <bbox-query s="37.53845" w="-121.99665" n="37.56336" e="-121.92850"/>
   </union>
-  <print mode="meta"/>
+  <print mode="body"/>
 </osm-script>
 
