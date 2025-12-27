@@ -1,7 +1,19 @@
 <osm-script output="xml" timeout="180">
   <union>
-    <bbox-query s="37.53845" w="-121.99665" n="37.56336" e="-121.92850"/>
+    <!-- All highways in bounding box -->
+    <query type="way">
+      <bbox-query s="37.53845" w="-121.99665" n="37.56336" e="-121.92850"/>
+      <has-kv k="highway"/>
+    </query>
+
+    <!-- All buildings in bounding box -->
+    <query type="way">
+      <bbox-query s="37.53845" w="-121.99665" n="37.56336" e="-121.92850"/>
+      <has-kv k="building"/>
+    </query>
   </union>
+
+  <print mode="body"/>
+  <recurse type="down"/> <!-- fetch all nodes that belong to these ways -->
   <print mode="body"/>
 </osm-script>
-
