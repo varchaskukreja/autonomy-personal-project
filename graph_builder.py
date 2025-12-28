@@ -114,18 +114,19 @@ def build_graph(osm_file):
     return graph, nodes_dict
 
 
-def visualize_graph(graph, nodes_dict):
+def visualize_graph(graph, nodes_dict, path=None):
     """
     Visualize the road graph using matplotlib.
     
     Args:
         graph: NetworkX DiGraph
         nodes_dict: Dictionary mapping node_id to (lat, lon)
+        path: Optional list of node IDs representing a path to highlight in red
     """
     plt.ioff()  # Turn off interactive mode to ensure plot displays
     plt.figure(figsize=(12, 12))
     
-    # Plot all edges
+    # Plot all edges in black
     edge_count = 0
     for u, v in graph.edges():
         if u in nodes_dict and v in nodes_dict:
@@ -140,9 +141,24 @@ def visualize_graph(graph, nodes_dict):
         print("Warning: No edges to plot! Check if graph has edges and nodes_dict has coordinates.")
         return
     
+    # Plot path in red if provided
+    if path and len(path) > 1:
+        path_segments = 0
+        for i in range(len(path) - 1):
+            u, v = path[i], path[i + 1]
+            if u in nodes_dict and v in nodes_dict:
+                lat1, lon1 = nodes_dict[u]
+                lat2, lon2 = nodes_dict[v]
+                plt.plot([lon1, lon2], [lat1, lat2], 'r-', linewidth=2, alpha=0.8)
+                path_segments += 1
+        print(f"Plotted {path_segments} path segments in red")
+    
     plt.xlabel("Longitude")
     plt.ylabel("Latitude")
-    plt.title("Fremont Road Graph")
+    title = "Fremont Road Graph"
+    if path:
+        title += " - Shortest Path"
+    plt.title(title)
     plt.grid(True, alpha=0.3)
     plt.axis('equal')
     plt.tight_layout()
@@ -159,7 +175,114 @@ if __name__ == "__main__":
     print(f"Graph nodes: {graph.number_of_nodes()}")
     print(f"Graph edges: {graph.number_of_edges()}")
     
-    # Optional: visualize the graph
-    # Uncomment the line below to visualize
-    visualize_graph(graph, nodes_dict)
+    # Test KD-tree spatial index
+    print("\n" + "="*50)
+    print("Testing KD-tree spatial index...")
+    print("="*50)
+    try:
+        from spatial_nearest_node_finder import build_kd_tree, find_nearest_node
+        import time
+        
+        # Build KD-tree
+        print("Building KD-tree...")
+        start_time = time.time()
+        tree, node_ids, coords = build_kd_tree(nodes_dict)
+        build_time = (time.time() - start_time) * 1000
+        print(f"KD-tree built in {build_time:.2f} ms")
+        print(f"Tree contains {len(node_ids)} nodes")
+        
+        # Test query
+        test_lat, test_lon = 37.5483, -121.9886
+        print(f"\nQuerying nearest node to ({test_lat}, {test_lon})...")
+        
+        query_start = time.time()
+        nearest = find_nearest_node(test_lat, test_lon, tree, node_ids)
+        query_time = (time.time() - query_start) * 1000
+        
+        print(f"Nearest node: {nearest}")
+        if nearest in nodes_dict:
+            nearest_lat, nearest_lon = nodes_dict[nearest]
+            print(f"Node coordinates: ({nearest_lat}, {nearest_lon})")
+            print(f"Query time: {query_time:.3f} ms")
+            
+            # Verify node exists in graph
+            if nearest in graph:
+                print(f"✅ Node {nearest} exists in graph")
+            else:
+                print(f"⚠️  Node {nearest} not in graph (but exists in nodes_dict)")
+        else:
+            print(f"❌ Node {nearest} not found in nodes_dict")
+        
+        # Test multiple queries for performance
+        print(f"\nTesting multiple queries...")
+        test_queries = [
+            (37.5483, -121.9886),
+            (37.5500, -121.9900),
+            (37.5450, -121.9850),
+        ]
+        query_times = []
+        for lat, lon in test_queries:
+            q_start = time.time()
+            _ = find_nearest_node(lat, lon, tree, node_ids)
+            q_time = (time.time() - q_start) * 1000
+            query_times.append(q_time)
+        
+        avg_time = sum(query_times) / len(query_times)
+        print(f"Average query time: {avg_time:.3f} ms")
+        if avg_time < 1.0:
+            print("✅ All queries are fast (<1 ms)")
+        else:
+            print(f"⚠️  Some queries took >1 ms (avg: {avg_time:.3f} ms)")
+            
+    except ImportError as e:
+        print(f"❌ Could not import spatial_nearest_node_finder: {e}")
+        print("Make sure scipy is installed: pip install scipy")
+    except Exception as e:
+        print(f"❌ Error during KD-tree test: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    # Integration test: Dijkstra routing
+    print("\n" + "="*50)
+    print("Testing Dijkstra routing...")
+    print("="*50)
+    try:
+        from dijkstra import dijkstra_custom_algorithm
+        
+        # Select start and end nodes for testing
+        node_list = list(graph.nodes())
+        if len(node_list) >= 2:
+            # Use first node and a node further in the list for testing
+            start_node = node_list[0]
+            # Try to find a node that's reasonably far but reachable
+            end_index = min(5000, len(node_list) - 1)
+            end_node = node_list[end_index]
+            
+            print(f"Start node: {start_node}")
+            print(f"End node: {end_node}")
+            
+            path, distance = dijkstra_custom_algorithm(graph, start_node, end_node)
+            
+            if path:
+                print(f"Path found!")
+                print(f"Path length: {len(path)} nodes")
+                print(f"Total distance: {distance:.2f} meters ({distance/1000:.2f} km)")
+                
+                # Visualize graph with path
+                visualize_graph(graph, nodes_dict, path)
+            else:
+                print(f"No path found between nodes (unreachable)")
+                print("Visualizing graph without path...")
+                visualize_graph(graph, nodes_dict)
+        else:
+            print("Not enough nodes for routing test")
+            visualize_graph(graph, nodes_dict)
+            
+    except ImportError as e:
+        print(f"❌ ImportError during Dijkstra test: {e}")
+        print("routing module not found, skipping Dijkstra test")
+        visualize_graph(graph, nodes_dict)
+    except Exception as e:
+        print(f"Error during routing test: {e}")
+        visualize_graph(graph, nodes_dict)
 
