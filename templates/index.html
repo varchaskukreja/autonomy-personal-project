@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fremont Route Planner</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🗺️ Fremont Route Planner</h1>
+            <p>Find the shortest route between two addresses in Fremont, CA</p>
+        </header>
+
+        <div class="form-container">
+            <form id="routeForm">
+                <div class="input-group">
+                    <label for="startAddress">Start Address</label>
+                    <div class="autocomplete-wrapper">
+                        <input 
+                            type="text" 
+                            id="startAddress" 
+                            name="startAddress" 
+                            placeholder="Enter start address..."
+                            autocomplete="off"
+                            required
+                        >
+                        <div id="startSuggestions" class="suggestions"></div>
+                    </div>
+                </div>
+
+                <div class="input-group">
+                    <label for="endAddress">End Address</label>
+                    <div class="autocomplete-wrapper">
+                        <input 
+                            type="text" 
+                            id="endAddress" 
+                            name="endAddress" 
+                            placeholder="Enter end address..."
+                            autocomplete="off"
+                            required
+                        >
+                        <div id="endSuggestions" class="suggestions"></div>
+                    </div>
+                </div>
+
+                <button type="submit" id="simulateBtn" class="btn-primary">
+                    🚗 Compute Route
+                </button>
+            </form>
+        </div>
+
+        <div id="loading" class="loading hidden">
+            <p>Loading route...</p>
+        </div>
+
+        <div id="results" class="results hidden">
+            <h2>Route Results</h2>
+            <div id="routeSummary" class="route-summary"></div>
+            <div id="routeDetails" class="route-details"></div>
+            <div id="statusMessage" class="status-message"></div>
+        </div>
+
+        <div id="error" class="error hidden"></div>
+    </div>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
+

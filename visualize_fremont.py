@@ -1,34 +1,37 @@
 import osmium
 import matplotlib.pyplot as plt
 
+#This script was essentially just a test, to make sure my fremont OSM was working and downloaded BOTH
+#ways and buildings.
 
-class MapHandler(osmium.SimpleHandler):
-    """Handler to extract roads and buildings from OSM data."""
+class MapHandler(osmium.SimpleHandler): 
+    """This class is used to extract roads and buildings from OSM data.
+    # It is a subclass of osmium.SimpleHandler, which is a base class for all OSM handlers."""
     
     def __init__(self):
-        super().__init__()
-        self.nodes = {}  # Store node coordinates by ID
-        self.highways = []  # Store highway ways as lists of node IDs
-        self.buildings = []  # Store building ways as lists of node IDs
-        self.highway_node_ids = []  # Store node ID lists for highways
-        self.building_node_ids = []  # Store node ID lists for buildings
+        super().__init__() #required for proper inheritance stuff (technicality)
+        self.nodes = {}  # Store node coordinates by ID (dictionary)
+        self.highways = []  # Store highway ways as lists of node IDs (list)
+        self.buildings = []  # Store building ways as lists of node IDs (list)
+        self.highway_node_ids = []  # Store node ID lists for highways (list)
+        self.building_node_ids = []  # Store node ID lists for buildings (list)
     
     def node(self, n):
-        """Store node coordinates."""
-        self.nodes[n.id] = (n.location.lon, n.location.lat)
+        """This method is called for each node in the OSM data.
+        # It stores the node coordinates by ID in the self.nodes dictionary, by longitude and latitude. """
+        self.nodes[n.id] = (n.location.lon, n.location.lat) 
     
     def way(self, w):
-        """Extract ways tagged as highway or building."""
-        # Get node IDs for this way
+        """ Get node IDs for this way (list of node IDs) """
         node_ids = [node.ref for node in w.nodes]
         
-        if 'highway' in w.tags:
+        if 'highway' in w.tags: #check if it's a highway
             self.highway_node_ids.append(node_ids)
-        if 'building' in w.tags:
+        if 'building' in w.tags: #check if it's a building
             self.building_node_ids.append(node_ids)
     
     def get_highway_coordinates(self):
-        """Convert highway node IDs to coordinates."""
+        """Convert highway node IDs to coordinates, helper method."""
         highways = []
         for node_ids in self.highway_node_ids:
             coords = []
@@ -39,8 +42,8 @@ class MapHandler(osmium.SimpleHandler):
                 highways.append(coords)
         return highways
     
-    def get_building_coordinates(self):
-        """Convert building node IDs to coordinates."""
+    def get_building_coordinates(self): 
+        """Convert building node IDs to coordinates, helper method."""
         buildings = []
         for node_ids in self.building_node_ids:
             coords = []

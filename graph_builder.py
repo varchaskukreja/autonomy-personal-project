@@ -2,6 +2,7 @@ import osmium
 import networkx as nx
 import numpy as np
 import matplotlib.pyplot as plt
+from typing import List, Tuple
 
 
 def haversine_distance(lat1, lon1, lat2, lon2):
@@ -112,6 +113,34 @@ def build_graph(osm_file):
                 graph.add_edge(v, u, weight=weight)
     
     return graph, nodes_dict
+
+
+def path_to_coordinates(path: List[int], nodes_dict: dict) -> List[Tuple[float, float]]:
+    """
+    Transform a list of OSM node IDs into an ordered list of (lat, lon) coordinates.
+    
+    Args:
+        path: List of node IDs from Dijkstra's algorithm
+        nodes_dict: Dictionary mapping node_id to (lat, lon)
+    
+    Returns:
+        List of tuples: [(lat1, lon1), (lat2, lon2), ...] in the same order as path
+    
+    Example:
+        path = [123, 456, 789]
+        nodes_dict = {123: (37.5, -122.0), 456: (37.6, -122.1), 789: (37.7, -122.2)}
+        result = [(37.5, -122.0), (37.6, -122.1), (37.7, -122.2)]
+    """
+    coordinates = []
+    
+    for node_id in path:
+        if node_id in nodes_dict:
+            coordinates.append(nodes_dict[node_id])
+        else:
+            # Gracefully handle missing nodes - skip them with a warning
+            print(f"Warning: Node {node_id} not found in nodes_dict, skipping")
+    
+    return coordinates
 
 
 def visualize_graph(graph, nodes_dict, path=None):
@@ -267,6 +296,17 @@ if __name__ == "__main__":
                 print(f"Path found!")
                 print(f"Path length: {len(path)} nodes")
                 print(f"Total distance: {distance:.2f} meters ({distance/1000:.2f} km)")
+                
+                # Test path_to_coordinates conversion
+                print("\nTesting path_to_coordinates conversion...")
+                coordinates = path_to_coordinates(path, nodes_dict)
+                print(f"✅ Converted {len(path)} node IDs to {len(coordinates)} coordinates")
+                if len(coordinates) == len(path):
+                    print("✅ Output list length matches path length")
+                    print(f"First coordinate: {coordinates[0]}")
+                    print(f"Last coordinate: {coordinates[-1]}")
+                else:
+                    print(f"⚠️  Warning: Some nodes were missing from nodes_dict")
                 
                 # Visualize graph with path
                 visualize_graph(graph, nodes_dict, path)
