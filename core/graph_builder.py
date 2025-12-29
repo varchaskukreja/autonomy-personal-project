@@ -50,15 +50,25 @@ class RoadGraphHandler(osmium.SimpleHandler):
     def way(self, w):
         """Extract ways tagged as highway and track oneway information."""
         if 'highway' in w.tags:
-            # Get node IDs for this way
-            node_ids = [node.ref for node in w.nodes]
+            highway_type = w.tags.get('highway', '')
             
-            # Check for oneway tag
-            oneway = w.tags.get('oneway', 'no')
+            # Exclude non-vehicular highway types
+            excluded_types = {
+                'footway', 'cycleway', 'path', 'steps', 'pedestrian', 
+                'bridleway', 'bus_guideway', 'escape', 'raceway'
+            }
             
-            # Only add if we have at least 2 nodes
-            if len(node_ids) >= 2:
-                self.highways.append((node_ids, oneway))
+            # Only include vehicular roads
+            if highway_type not in excluded_types:
+                # Get node IDs for this way
+                node_ids = [node.ref for node in w.nodes]
+                
+                # Check for oneway tag
+                oneway = w.tags.get('oneway', 'no')
+                
+                # Only add if we have at least 2 nodes
+                if len(node_ids) >= 2:
+                    self.highways.append((node_ids, oneway))
 
 
 def build_graph(osm_file):
