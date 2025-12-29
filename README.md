@@ -33,14 +33,14 @@ Make sure `fremont_raw.osm` is in `data/osm/` directory.
 From the project root directory:
 
 ```bash
-python -m web.app
+python3 -m web.app
 ```
 
 Or:
 
 ```bash
 cd web
-python app.py
+python3 app.py
 ```
 
 The server will:
