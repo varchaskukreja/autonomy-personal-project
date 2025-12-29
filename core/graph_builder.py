@@ -196,9 +196,15 @@ def visualize_graph(graph, nodes_dict, path=None):
 
 
 if __name__ == "__main__":
+    import os
+    import sys
+    # Add parent directory to path for imports
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    
     # Build graph from Fremont OSM data
     print("Loading OSM data and building graph...")
-    graph, nodes_dict = build_graph("fremont_raw.osm")
+    osm_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "osm", "fremont_raw.osm")
+    graph, nodes_dict = build_graph(osm_path)
     
     # Print statistics
     print(f"Graph nodes: {graph.number_of_nodes()}")
@@ -209,7 +215,7 @@ if __name__ == "__main__":
     print("Testing KD-tree spatial index...")
     print("="*50)
     try:
-        from spatial_nearest_node_finder import build_kd_tree, find_nearest_node
+        from core.spatial_index import build_kd_tree, find_nearest_node
         import time
         
         # Build KD-tree
@@ -264,7 +270,7 @@ if __name__ == "__main__":
             print(f"⚠️  Some queries took >1 ms (avg: {avg_time:.3f} ms)")
             
     except ImportError as e:
-        print(f"❌ Could not import spatial_nearest_node_finder: {e}")
+        print(f"❌ Could not import spatial_index: {e}")
         print("Make sure scipy is installed: pip install scipy")
     except Exception as e:
         print(f"❌ Error during KD-tree test: {e}")
@@ -276,7 +282,7 @@ if __name__ == "__main__":
     print("Testing Dijkstra routing...")
     print("="*50)
     try:
-        from dijkstra import dijkstra_custom_algorithm
+        from core.routing import dijkstra_custom_algorithm
         
         # Select start and end nodes for testing
         node_list = list(graph.nodes())

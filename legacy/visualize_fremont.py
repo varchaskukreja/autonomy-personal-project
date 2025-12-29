@@ -56,10 +56,13 @@ class MapHandler(osmium.SimpleHandler):
 
 
 def main():
+    import os
     # Load Fremont OSM data
     print("Loading OSM data...")
     handler = MapHandler()
-    handler.apply_file("fremont_raw.osm")
+    # Use path relative to project root
+    osm_path = os.path.join(os.path.dirname(__file__), "data", "osm", "fremont_raw.osm")
+    handler.apply_file(osm_path)
     
     # Extract coordinates
     print("Extracting roads and buildings...")

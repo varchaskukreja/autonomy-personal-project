@@ -1,6 +1,8 @@
 from scipy.spatial import KDTree
 import numpy as np
 
+#has the KD-tree & finding the nearest node
+
 
 def build_kd_tree(nodes_dict):
     """
@@ -44,11 +46,17 @@ def find_nearest_node(lat, lon, tree, node_ids):
 
 
 if __name__ == "__main__":
+    import os
+    import sys
+    # Add parent directory to path for imports
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    
     # Standalone test
-    from graph_builder import build_graph
+    from core.graph_builder import build_graph
     
     print("Building graph...")
-    graph, nodes_dict = build_graph("fremont_raw.osm")
+    osm_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "osm", "fremont_raw.osm")
+    graph, nodes_dict = build_graph(osm_path)
     
     print("Building KD-tree...")
     tree, node_ids, _ = build_kd_tree(nodes_dict)

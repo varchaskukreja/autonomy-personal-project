@@ -1,12 +1,18 @@
 from flask import Flask, render_template, request, jsonify
 import requests
 import time
-from graph_builder import build_graph, path_to_coordinates
-from spatial_nearest_node_finder import build_kd_tree, find_nearest_node
-from dijkstra import dijkstra_custom_algorithm
+import os
+import sys
+
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from core.graph_builder import build_graph, path_to_coordinates
+from core.spatial_index import build_kd_tree, find_nearest_node
+from core.routing import dijkstra_custom_algorithm
 import networkx as nx
 
-app = Flask(__name__)
+app = Flask(__name__, template_folder='templates', static_folder='static')
 
 # Global variables to store graph data (loaded on startup)
 graph = None
@@ -20,7 +26,10 @@ def load_graph_data():
     global graph, nodes_dict, kd_tree, node_ids_list
     
     print("Loading OSM data and building graph...")
-    graph, nodes_dict = build_graph("fremont_raw.osm")
+    # Get path to OSM file relative to project root
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    osm_path = os.path.join(project_root, "data", "osm", "fremont_raw.osm")
+    graph, nodes_dict = build_graph(osm_path)
     
     print("Building KD-tree from graph nodes only...")
     # Only include nodes that are actually in the graph (part of highway ways)

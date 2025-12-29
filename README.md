@@ -26,11 +26,20 @@ pip install Flask requests scipy networkx numpy matplotlib osmium
 
 ### 2. Ensure OSM Data File
 
-Make sure `fremont_raw.osm` is in the project directory.
+Make sure `fremont_raw.osm` is in `data/osm/` directory.
 
 ### 3. Run the Application
 
+From the project root directory:
+
 ```bash
+python -m web.app
+```
+
+Or:
+
+```bash
+cd web
 python app.py
 ```
 
@@ -62,17 +71,24 @@ Navigate to: `http://127.0.0.1:5000`
 
 ```
 .
-├── app.py                          # Flask server
-├── graph_builder.py                # OSM graph construction
-├── dijkstra.py                     # Dijkstra algorithm
-├── spatial_nearest_node_finder.py  # KD-tree spatial index
-├── templates/
-│   └── index.html                  # Main UI
-├── static/
-│   ├── style.css                  # Styling
-│   └── app.js                     # Frontend JavaScript
-├── fremont_raw.osm                # OSM data file
-└── requirements.txt               # Python dependencies
+├── core/                              # Core routing modules
+│   ├── __init__.py
+│   ├── graph_builder.py              # OSM graph construction
+│   ├── routing.py                    # Dijkstra algorithm
+│   └── spatial_index.py             # KD-tree spatial index
+├── web/                              # Web application
+│   ├── __init__.py
+│   ├── app.py                        # Flask server
+│   ├── templates/
+│   │   └── index.html                # Main UI
+│   └── static/
+│       ├── style.css                 # Styling
+│       └── app.js                    # Frontend JavaScript
+├── data/
+│   └── osm/
+│       └── fremont_raw.osm           # OSM data file
+├── README.md
+└── requirements.txt                   # Python dependencies
 ```
 
 ## Notes
@@ -84,8 +100,7 @@ Navigate to: `http://127.0.0.1:5000`
 
 ## Troubleshooting
 
-**Import errors**: Make sure all dependencies are installed
+**Import errors**: Make sure all dependencies are installed and you're running from the project root
 **Graph loading slow**: First startup loads the entire OSM file (may take 30-60 seconds)
 **No autocomplete**: Check internet connection (requires Nominatim API)
 **Route not found**: Ensure addresses are within the Fremont area covered by the OSM data
-
