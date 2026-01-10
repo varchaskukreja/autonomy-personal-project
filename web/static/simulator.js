@@ -24,13 +24,15 @@ const vehicle = {
     z: 0,
     angle: 0, // theta (radians)
     velocity: 0, // v (m/s)
-    steering: 0, // delta (radians) - steering angle
+    steering: 0, // delta (radians) - steering angle (target)
+    steeringActual: 0, // actual steering with smoothing
     wheelbase: 2.5, // L (meters) - distance between front and rear axles
-    maxSteeringAngle: Math.PI / 6, // 30 degrees max steering
+    maxSteeringAngle: Math.PI / 4.5, // ~40 degrees max steering for better turning
     maxSpeed: 25, // m/s (~56 mph)
     acceleration: 0,
     angularVelocity: 0,
-    tilt: 0 // for visual tilt on curves
+    tilt: 0, // for visual tilt on curves
+    tiltTarget: 0 // target tilt for smooth interpolation
 };
 
 // Ground plane
@@ -152,24 +154,33 @@ window.addEventListener('resize', () => {
 // Physics constants
 const ACCELERATION_RATE = 15.0; // m/s²
 const BRAKE_RATE = 20.0; // m/s²
-const STEERING_RATE = 3.0; // rad/s
-const FRICTION = 0.95; // velocity decay when no input
+const STEERING_RATE = 4.0; // rad/s - how fast steering changes
+const STEERING_SMOOTH = 12.0; // steering smoothing rate (higher = smoother)
+const FRICTION = 0.98; // velocity decay when no input (higher = less friction)
+const MIN_SPEED_FOR_TURN = 0.3; // minimum speed to allow turning
+const MAX_ANGULAR_VELOCITY = 1.2; // rad/s - maximum rotation speed (prevents instant 360s)
+const MIN_TURNING_RADIUS = 4.0; // meters - minimum realistic turning radius
+const TURN_SPEED_REDUCTION = 0.4; // how much speed is reduced during turns (0-1, higher = more reduction)
+const BASE_MAX_SPEED = 25.0; // m/s (~56 mph) - base max speed
 
 // Bicycle model physics
 function updatePhysics(deltaTime) {
-    // Steering input
+    // Steering input (target steering)
     if (keys.a) {
         vehicle.steering = Math.max(vehicle.steering - STEERING_RATE * deltaTime, -vehicle.maxSteeringAngle);
     } else if (keys.d) {
         vehicle.steering = Math.min(vehicle.steering + STEERING_RATE * deltaTime, vehicle.maxSteeringAngle);
     } else {
-        // Return steering to center
-        if (vehicle.steering > 0) {
-            vehicle.steering = Math.max(0, vehicle.steering - STEERING_RATE * deltaTime * 2);
-        } else if (vehicle.steering < 0) {
-            vehicle.steering = Math.min(0, vehicle.steering + STEERING_RATE * deltaTime * 2);
-        }
+        // Return steering to center smoothly
+        vehicle.steering = THREE.MathUtils.lerp(vehicle.steering, 0, STEERING_RATE * deltaTime * 2);
     }
+
+    // Smooth steering interpolation (wheels turn gradually, not instantly)
+    vehicle.steeringActual = THREE.MathUtils.lerp(
+        vehicle.steeringActual,
+        vehicle.steering,
+        STEERING_SMOOTH * deltaTime
+    );
 
     // Throttle/Brake input
     if (keys.w) {
@@ -180,24 +191,61 @@ function updatePhysics(deltaTime) {
         vehicle.acceleration = 0;
         // Apply friction when no input
         vehicle.velocity *= FRICTION;
-        if (Math.abs(vehicle.velocity) < 0.1) {
+        if (Math.abs(vehicle.velocity) < 0.05) {
             vehicle.velocity = 0;
         }
     }
 
     // Update velocity
     vehicle.velocity += vehicle.acceleration * deltaTime;
-    vehicle.velocity = Math.max(-vehicle.maxSpeed * 0.5, Math.min(vehicle.maxSpeed, vehicle.velocity));
+    
+    // Speed reduction during turns (realistic: can't maintain max speed while turning sharply)
+    // More steering = more speed reduction
+    const steeringFactor = Math.abs(vehicle.steeringActual) / vehicle.maxSteeringAngle; // 0 to 1
+    const speedReductionFactor = 1.0 - (steeringFactor * TURN_SPEED_REDUCTION); // 1.0 to 0.6
+    const effectiveMaxSpeed = BASE_MAX_SPEED * speedReductionFactor;
+    
+    // Clamp velocity with turn-based max speed
+    vehicle.velocity = Math.max(-effectiveMaxSpeed * 0.5, Math.min(effectiveMaxSpeed, vehicle.velocity));
 
-    // Bicycle model equations
+    // Only allow turning when moving (more realistic - cars can't turn in place)
+    const effectiveSteering = Math.abs(vehicle.velocity) > MIN_SPEED_FOR_TURN 
+        ? vehicle.steeringActual 
+        : 0;
+
+    // Bicycle model equations - use actual smoothed steering
     // θ += (v / L) * tan(δ) * dt
-    vehicle.angularVelocity = (vehicle.velocity / vehicle.wheelbase) * Math.tan(vehicle.steering);
-    vehicle.angle += vehicle.angularVelocity * deltaTime;
+    // Only turn if moving
+    if (Math.abs(vehicle.velocity) > MIN_SPEED_FOR_TURN) {
+        // Calculate angular velocity from bicycle model
+        let angularVel = (vehicle.velocity / vehicle.wheelbase) * Math.tan(effectiveSteering);
+        
+        // Limit angular velocity to prevent instant 360s and unrealistic turning
+        // This enforces a minimum turning radius based on speed
+        const maxAngularVel = Math.abs(vehicle.velocity) / MIN_TURNING_RADIUS;
+        angularVel = Math.max(-Math.min(MAX_ANGULAR_VELOCITY, maxAngularVel), 
+                             Math.min(MAX_ANGULAR_VELOCITY, maxAngularVel, angularVel));
+        
+        vehicle.angularVelocity = angularVel;
+        vehicle.angle += vehicle.angularVelocity * deltaTime;
+    } else {
+        // No turning when stationary or moving too slowly
+        vehicle.angularVelocity = 0;
+    }
 
-    // x += v * cos(θ) * dt
-    // z += v * sin(θ) * dt
-    vehicle.x += vehicle.velocity * Math.cos(vehicle.angle) * deltaTime;
-    vehicle.z += vehicle.velocity * Math.sin(vehicle.angle) * deltaTime;
+    // In three.js: X is left/right, Z is forward/backward
+    // For angle=0, we want to move forward (negative Z direction)
+    // x += v * sin(θ) * dt (horizontal movement)
+    // z -= v * cos(θ) * dt (forward movement, negative because +Z goes into screen)
+    vehicle.x += vehicle.velocity * Math.sin(vehicle.angle) * deltaTime;
+    vehicle.z -= vehicle.velocity * Math.cos(vehicle.angle) * deltaTime;
+
+    // Calculate tilt target based on angular velocity and speed (SlowRoads.io style)
+    // More tilt when turning fast at high speed
+    const speedFactor = Math.min(Math.abs(vehicle.velocity) / vehicle.maxSpeed, 1.0);
+    const turnFactor = Math.min(Math.abs(vehicle.angularVelocity) * 2.0, 1.0);
+    vehicle.tiltTarget = vehicle.angularVelocity * 0.15 * speedFactor * turnFactor;
+    vehicle.tiltTarget = Math.max(-0.2, Math.min(0.2, vehicle.tiltTarget)); // Clamp to reasonable range
 
     // Reset position with spacebar
     if (keys.space) {
@@ -206,6 +254,9 @@ function updatePhysics(deltaTime) {
         vehicle.angle = 0;
         vehicle.velocity = 0;
         vehicle.steering = 0;
+        vehicle.steeringActual = 0;
+        vehicle.tilt = 0;
+        vehicle.tiltTarget = 0;
     }
 }
 
@@ -216,43 +267,88 @@ function updateVehicleVisuals() {
     carGroup.position.z = vehicle.z;
     carGroup.rotation.y = -vehicle.angle; // Negative because three.js rotates around Y axis
 
-    // Tilt effect on curves (SlowRoads.io style)
-    const tiltAmount = vehicle.angularVelocity * 0.3; // Adjust multiplier for tilt intensity
-    vehicle.tilt = THREE.MathUtils.lerp(vehicle.tilt, tiltAmount, 0.1);
-    carGroup.rotation.z = vehicle.tilt;
+    // Smooth tilt interpolation (prevents 90 degree jumps)
+    vehicle.tilt = THREE.MathUtils.lerp(vehicle.tilt, vehicle.tiltTarget, 0.15);
+    // Apply tilt with smoothing - only tilt if moving
+    if (Math.abs(vehicle.velocity) > 0.1) {
+        carGroup.rotation.z = vehicle.tilt;
+    } else {
+        carGroup.rotation.z = THREE.MathUtils.lerp(carGroup.rotation.z, 0, 0.2);
+    }
 
-    // Rotate wheels based on velocity
-    const wheelRotationSpeed = vehicle.velocity * 0.5;
+    // Rotate wheels based on velocity (smooth rotation)
+    const wheelRotationSpeed = vehicle.velocity * 0.8; // Faster rotation for visual effect
     wheels.forEach((wheel, index) => {
-        wheel.rotation.x += wheelRotationSpeed;
+        // Rotate wheels around X axis when moving
+        if (Math.abs(vehicle.velocity) > 0.01) {
+            wheel.rotation.x += wheelRotationSpeed * 0.01;
+        }
         
-        // Front wheels turn with steering
+        // Front wheels (first 2) turn smoothly with actual steering
         if (index < 2) {
-            wheel.rotation.y = vehicle.steering;
+            // Smooth wheel turning - wheels turn before car body rotates
+            const currentWheelAngle = wheel.rotation.y;
+            wheel.rotation.y = THREE.MathUtils.lerp(currentWheelAngle, vehicle.steeringActual, 0.2);
+        } else {
+            // Rear wheels stay straight
+            wheel.rotation.y = 0;
         }
     });
 
-    // Subtle suspension effect (bouncing on velocity changes)
-    const targetY = 0.5 + Math.abs(vehicle.velocity) * 0.01;
+    // Subtle suspension effect (slight bounce based on speed)
+    const targetY = 0.5 + Math.abs(vehicle.velocity) * 0.008;
     carBody.position.y = THREE.MathUtils.lerp(carBody.position.y, targetY, 0.1);
+    
+    // Slight body roll when turning (subtle)
+    const bodyRoll = vehicle.steeringActual * 0.15;
+    carBody.rotation.z = THREE.MathUtils.lerp(carBody.rotation.z, bodyRoll, 0.1);
 }
 
 // Camera follow with smooth interpolation
 function updateCamera() {
-    const targetPosition = new THREE.Vector3(vehicle.x, 8, vehicle.z + 10);
-    const offset = new THREE.Vector3(
-        Math.sin(vehicle.angle) * 10,
-        8,
-        Math.cos(vehicle.angle) * 10
+    // In three.js: X = left/right, Y = up, Z = forward/backward
+    // Ground plane is in XZ plane, Y is vertical
+    // Car movement: when angle=0, moves forward in -Z direction (toward camera)
+    
+    const offsetDistance = 12; // Distance behind vehicle
+    const offsetHeight = 8; // Height above vehicle
+    
+    // Calculate offset: camera should be behind the car (opposite of facing direction)
+    // When car faces direction 'angle', camera should be at 'angle + PI' (180 degrees behind)
+    // Car forward direction is: (sin(angle), -cos(angle)) in XZ plane
+    // Camera behind direction is: (-sin(angle), cos(angle)) in XZ plane
+    
+    const behindOffsetX = -Math.sin(vehicle.angle) * offsetDistance;
+    const behindOffsetZ = Math.cos(vehicle.angle) * offsetDistance; // Positive because forward is -Z, so behind is +Z
+    
+    // Target camera position: vehicle position + behind offset
+    const targetPosition = new THREE.Vector3(
+        vehicle.x + behindOffsetX,
+        offsetHeight,
+        vehicle.z + behindOffsetZ
     );
-    targetPosition.add(offset);
 
-    // Smooth camera follow (lerping)
-    camera.position.lerp(targetPosition, 0.1);
+    // Much smoother camera follow (slower lerping for less jaggy movement)
+    camera.position.lerp(targetPosition, 0.05);
 
-    // Look at vehicle
-    const lookTarget = new THREE.Vector3(vehicle.x, 1, vehicle.z);
-    camera.lookAt(lookTarget);
+    // Look at a point slightly ahead of the vehicle (in the direction it's facing)
+    const lookAheadDistance = 5;
+    const aheadOffsetX = -Math.sin(vehicle.angle) * lookAheadDistance;
+    const aheadOffsetZ = Math.cos(vehicle.angle) * lookAheadDistance;
+    const lookTarget = new THREE.Vector3(
+        vehicle.x + aheadOffsetX,
+        1.2, // Look slightly above ground for better view
+        vehicle.z + aheadOffsetZ
+    );
+    
+    // Much smoother look-at for better camera behavior (slower interpolation)
+    const currentDirection = new THREE.Vector3();
+    camera.getWorldDirection(currentDirection);
+    currentDirection.multiplyScalar(10).add(camera.position);
+    
+    const smoothLookTarget = new THREE.Vector3();
+    smoothLookTarget.lerpVectors(currentDirection, lookTarget, 0.08);
+    camera.lookAt(smoothLookTarget);
 }
 
 // Update UI
