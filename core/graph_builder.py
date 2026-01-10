@@ -2,7 +2,7 @@ import osmium
 import networkx as nx
 import numpy as np
 import matplotlib.pyplot as plt
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 
 
 def haversine_distance(lat1, lon1, lat2, lon2):
@@ -37,10 +37,12 @@ def haversine_distance(lat1, lon1, lat2, lon2):
 class RoadGraphHandler(osmium.SimpleHandler):
     """Handler to extract nodes and highway ways from OSM data for graph building."""
     
-    def __init__(self):
+    def __init__(self, extract_buildings=False):
         super().__init__()
         self.nodes = {}  # Store node coordinates: {node_id: (lat, lon)}
-        self.highways = []  # Store highway ways: [(node_ids, oneway_tag), ...]
+        self.highways = []  # Store highway ways: [(node_ids, oneway_tag, highway_type), ...]
+        self.buildings = []  # Store building ways: [(node_ids), ...] (only if extract_buildings=True)
+        self.extract_buildings = extract_buildings
     
     def node(self, n):
         """Store node coordinates by ID."""
@@ -68,7 +70,13 @@ class RoadGraphHandler(osmium.SimpleHandler):
                 
                 # Only add if we have at least 2 nodes
                 if len(node_ids) >= 2:
-                    self.highways.append((node_ids, oneway))
+                    self.highways.append((node_ids, oneway, highway_type))
+        
+        # Extract buildings if requested (for 3D rendering)
+        if self.extract_buildings and 'building' in w.tags:
+            node_ids = [node.ref for node in w.nodes]
+            if len(node_ids) >= 3:  # Buildings need at least 3 nodes (polygon)
+                self.buildings.append(node_ids)
 
 
 def build_graph(osm_file):
@@ -91,7 +99,7 @@ def build_graph(osm_file):
     nodes_dict = handler.nodes.copy()
     
     # Add edges for each highway way
-    for node_ids, oneway in handler.highways:
+    for node_ids, oneway, highway_type in handler.highways:
         # Skip if we don't have valid coordinates for all nodes
         valid_nodes = [nid for nid in node_ids if nid in handler.nodes]
         
@@ -123,6 +131,154 @@ def build_graph(osm_file):
                 graph.add_edge(v, u, weight=weight)
     
     return graph, nodes_dict
+
+
+def extract_map_data_for_rendering(osm_file: str) -> Dict:
+    """
+    Extract roads and buildings from OSM for 3D rendering.
+    Matches visualize_fremont.py behavior: includes ALL highways (no filtering).
+    Uses existing RoadGraphHandler but with modified filtering.
+    
+    Args:
+        osm_file: Path to OSM file
+    
+    Returns:
+        dict with 'nodes', 'roads', and 'buildings' keys
+    """
+    import osmium
+    
+    # Create a handler that matches visualize_fremont.py behavior (no highway filtering)
+    class MapDataHandler(osmium.SimpleHandler):
+        def __init__(self):
+            super().__init__()
+            self.nodes = {}
+            self.highways = []  # Store as (node_ids, highway_type)
+            self.buildings = []
+        
+        def node(self, n):
+            """Store node coordinates by ID."""
+            if n.location.valid():
+                self.nodes[n.id] = (n.location.lat, n.location.lon)
+        
+        def way(self, w):
+            """Extract ALL highways (matching visualize_fremont.py) and buildings."""
+            node_ids = [node.ref for node in w.nodes]
+            
+            # Extract ALL highways (no filtering, matching visualize_fremont.py)
+            if 'highway' in w.tags:
+                highway_type = w.tags.get('highway', '')
+                if len(node_ids) >= 2:
+                    self.highways.append((node_ids, highway_type))
+            
+            # Extract buildings
+            if 'building' in w.tags:
+                if len(node_ids) >= 3:
+                    self.buildings.append(node_ids)
+    
+    # Parse OSM data with handler that matches visualize_fremont.py
+    handler = MapDataHandler()
+    handler.apply_file(osm_file)
+    
+    # Extract roads from highways (full way segments, preserving all nodes)
+    road_segments = []
+    for node_ids, highway_type in handler.highways:
+        coords = []
+        for node_id in node_ids:
+            if node_id in handler.nodes:
+                lat, lon = handler.nodes[node_id]
+                coords.append((lat, lon))
+        if len(coords) >= 2:
+            road_segments.append({
+                'coordinates': coords,
+                'type': highway_type
+            })
+    
+    # Extract buildings
+    building_polygons = []
+    for node_ids in handler.buildings:
+        coords = []
+        for node_id in node_ids:
+            if node_id in handler.nodes:
+                lat, lon = handler.nodes[node_id]
+                coords.append((lat, lon))
+        if len(coords) >= 3:
+            building_polygons.append({
+                'coordinates': coords
+            })
+    
+    return {
+        'nodes': handler.nodes,
+        'roads': road_segments,
+        'buildings': building_polygons
+    }
+
+
+def latlon_to_local_meters(lat: float, lon: float, center_lat: float, center_lon: float) -> Tuple[float, float]:
+    """
+    Convert lat/lon to local Cartesian coordinates in meters.
+    
+    Args:
+        lat, lon: Point coordinates
+        center_lat, center_lon: Reference point (center of map)
+    
+    Returns:
+        (x, z) in meters (x = east, z = north)
+    """
+    import math
+    
+    # Earth radius in meters
+    R = 6371000
+    
+    # Convert to radians
+    lat_rad = math.radians(lat)
+    lon_rad = math.radians(lon)
+    center_lat_rad = math.radians(center_lat)
+    center_lon_rad = math.radians(center_lon)
+    
+    # Calculate offsets in meters
+    x = R * (lon_rad - center_lon_rad) * abs(math.cos(center_lat_rad))
+    z = R * (lat_rad - center_lat_rad)
+    
+    return (x, z)
+
+
+def transform_map_data_for_rendering(map_data: Dict, center_lat: float, center_lon: float) -> Dict:
+    """
+    Transform map data from lat/lon to local Cartesian coordinates for 3D rendering.
+    
+    Args:
+        map_data: Output from extract_map_data_for_rendering()
+        center_lat, center_lon: Reference point for coordinate system
+    
+    Returns:
+        Transformed map data with coordinates in meters
+    """
+    transformed_roads = []
+    for road in map_data['roads']:
+        transformed_coords = []
+        for lat, lon in road['coordinates']:
+            x, z = latlon_to_local_meters(lat, lon, center_lat, center_lon)
+            transformed_coords.append((x, z))
+        transformed_roads.append({
+            'coordinates': transformed_coords,
+            'type': road.get('type', 'road')
+        })
+    
+    transformed_buildings = []
+    for building in map_data['buildings']:
+        transformed_coords = []
+        for lat, lon in building['coordinates']:
+            x, z = latlon_to_local_meters(lat, lon, center_lat, center_lon)
+            transformed_coords.append((x, z))
+        transformed_buildings.append({
+            'coordinates': transformed_coords
+        })
+    
+    return {
+        'roads': transformed_roads,
+        'buildings': transformed_buildings,
+        'center': (center_lat, center_lon)
+    }
 
 
 def path_to_coordinates(path: List[int], nodes_dict: dict) -> List[Tuple[float, float]]:
