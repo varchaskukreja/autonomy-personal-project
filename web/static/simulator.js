@@ -692,7 +692,7 @@ async function loadMapData() {
         
         // Debug: optionally show node markers (comment out for production)
         // renderDebugNodeMarkers(mapData.roads);
-        
+
         // Center vehicle at map center (0, 0 after transformation)
         vehicle.x = 0;
         vehicle.z = 0;
