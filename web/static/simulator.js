@@ -127,36 +127,139 @@ const cameraOffset = new THREE.Vector3(0, 8, 10); // Behind and above vehicle
 camera.position.copy(carGroup.position).add(cameraOffset);
 camera.lookAt(carGroup.position);
 
+// Store initial positions for reset
+const initialCarPosition = { x: 0, z: 0, angle: 0 };
+const initialCameraPosition = camera.position.clone();
+const initialCameraLookAt = carGroup.position.clone();
+
+// Admin camera mode state
+const adminCamera = {
+    enabled: false,
+    position: camera.position.clone(),
+    lookAt: new THREE.Vector3(0, 0, 0),
+    speed: 20, // meters per second
+    fastSpeed: 60, // fast speed with shift
+    topDownMode: false
+};
+
 // Input handling
 const keys = {
     w: false,
     s: false,
     a: false,
     d: false,
-    space: false
+    space: false,
+    // Admin camera controls
+    arrowUp: false,
+    arrowDown: false,
+    arrowLeft: false,
+    arrowRight: false,
+    q: false, // Up (Y+)
+    e: false, // Down (Y-)
+    shift: false,
+    tab: false
 };
 
 window.addEventListener('keydown', (e) => {
     const key = e.key.toLowerCase();
-    if (key === 'w' || key === 's' || key === 'a' || key === 'd') {
+    const code = e.code;
+    
+    // WASD for car (only if admin mode is off)
+    if (!adminCamera.enabled && (key === 'w' || key === 's' || key === 'a' || key === 'd')) {
         keys[key] = true;
         e.preventDefault();
     }
+    
+    // Spacebar for reset (always active)
     if (key === ' ') {
         keys.space = true;
         e.preventDefault();
+        // Reset immediately on spacebar press
+        resetCarAndCamera();
+    }
+    
+    // Tab to toggle admin camera mode
+    if (key === 'tab') {
+        keys.tab = true;
+        e.preventDefault();
+        toggleAdminCamera();
+    }
+    
+    // Shift for fast movement
+    if (code === 'ShiftLeft' || code === 'ShiftRight') {
+        keys.shift = true;
+    }
+    
+    // Admin camera controls (only when admin mode is enabled)
+    if (adminCamera.enabled) {
+        if (code === 'ArrowUp' || code === 'KeyW') {
+            keys.arrowUp = true;
+            e.preventDefault();
+        }
+        if (code === 'ArrowDown' || code === 'KeyS') {
+            keys.arrowDown = true;
+            e.preventDefault();
+        }
+        if (code === 'ArrowLeft' || code === 'KeyA') {
+            keys.arrowLeft = true;
+            e.preventDefault();
+        }
+        if (code === 'ArrowRight' || code === 'KeyD') {
+            keys.arrowRight = true;
+            e.preventDefault();
+        }
+        if (key === 'q') {
+            keys.q = true; // Move up (Y+)
+            e.preventDefault();
+        }
+        if (key === 'e') {
+            keys.e = true; // Move down (Y-)
+            e.preventDefault();
+        }
+        // T for top-down view toggle
+        if (key === 't') {
+            e.preventDefault();
+            toggleTopDownView();
+        }
     }
 });
 
 window.addEventListener('keyup', (e) => {
     const key = e.key.toLowerCase();
+    const code = e.code;
+    
+    // WASD for car
     if (key === 'w' || key === 's' || key === 'a' || key === 'd') {
         keys[key] = false;
-        e.preventDefault();
     }
     if (key === ' ') {
         keys.space = false;
-        e.preventDefault();
+    }
+    if (key === 'tab') {
+        keys.tab = false;
+    }
+    if (code === 'ShiftLeft' || code === 'ShiftRight') {
+        keys.shift = false;
+    }
+    
+    // Admin camera controls
+    if (code === 'ArrowUp' || code === 'KeyW') {
+        keys.arrowUp = false;
+    }
+    if (code === 'ArrowDown' || code === 'KeyS') {
+        keys.arrowDown = false;
+    }
+    if (code === 'ArrowLeft' || code === 'KeyA') {
+        keys.arrowLeft = false;
+    }
+    if (code === 'ArrowRight' || code === 'KeyD') {
+        keys.arrowRight = false;
+    }
+    if (key === 'q') {
+        keys.q = false;
+    }
+    if (key === 'e') {
+        keys.e = false;
     }
 });
 
@@ -181,10 +284,10 @@ const BASE_MAX_SPEED = 25.0; // m/s (~56 mph) - base max speed
 
 // Bicycle model physics
 function updatePhysics(deltaTime) {
-    // Steering input (target steering)
-    if (keys.a) {
+    // Steering input (target steering) - only if admin mode is off
+    if (!adminCamera.enabled && keys.a) {
         vehicle.steering = Math.max(vehicle.steering - STEERING_RATE * deltaTime, -vehicle.maxSteeringAngle);
-    } else if (keys.d) {
+    } else if (!adminCamera.enabled && keys.d) {
         vehicle.steering = Math.min(vehicle.steering + STEERING_RATE * deltaTime, vehicle.maxSteeringAngle);
     } else {
         // Return steering to center smoothly
@@ -198,10 +301,10 @@ function updatePhysics(deltaTime) {
         STEERING_SMOOTH * deltaTime
     );
 
-    // Throttle/Brake input
-    if (keys.w) {
+    // Throttle/Brake input - only if admin mode is off
+    if (!adminCamera.enabled && keys.w) {
         vehicle.acceleration = ACCELERATION_RATE;
-    } else if (keys.s) {
+    } else if (!adminCamera.enabled && keys.s) {
         vehicle.acceleration = -BRAKE_RATE;
     } else {
         vehicle.acceleration = 0;
@@ -263,17 +366,7 @@ function updatePhysics(deltaTime) {
     vehicle.tiltTarget = vehicle.angularVelocity * 0.15 * speedFactor * turnFactor;
     vehicle.tiltTarget = Math.max(-0.2, Math.min(0.2, vehicle.tiltTarget)); // Clamp to reasonable range
 
-    // Reset position with spacebar
-    if (keys.space) {
-        vehicle.x = 0;
-        vehicle.z = 0;
-        vehicle.angle = 0;
-        vehicle.velocity = 0;
-        vehicle.steering = 0;
-        vehicle.steeringActual = 0;
-        vehicle.tilt = 0;
-        vehicle.tiltTarget = 0;
-    }
+    // Note: Reset is now handled separately via resetCarAndCamera() function
 }
 
 // SlowRoads.io-style visual effects
@@ -320,8 +413,178 @@ function updateVehicleVisuals() {
     carBody.rotation.z = THREE.MathUtils.lerp(carBody.rotation.z, bodyRoll, 0.1);
 }
 
-// Camera follow with smooth interpolation
+// Admin camera controls
+function updateAdminCamera(deltaTime) {
+    const speed = keys.shift ? adminCamera.fastSpeed : adminCamera.speed;
+    const moveSpeed = speed * deltaTime;
+    
+    // Get camera's forward and right vectors in world space
+    const forward = new THREE.Vector3();
+    camera.getWorldDirection(forward);
+    const right = new THREE.Vector3();
+    right.crossVectors(forward, camera.up).normalize();
+    const up = new THREE.Vector3(0, 1, 0);
+    
+    // If in top-down mode, use XZ plane movement (panning) and Q/E for zoom (Y movement)
+    if (adminCamera.topDownMode) {
+        // Forward/backward (Arrow Up/Down or W/S) - move along Z axis (north/south)
+        if (keys.arrowUp || keys.arrowDown) {
+            const direction = keys.arrowUp ? -1 : 1;
+            adminCamera.position.z += direction * moveSpeed;
+        }
+        // Left/right (Arrow Left/Right or A/D) - move along X axis (east/west)
+        if (keys.arrowLeft || keys.arrowRight) {
+            const direction = keys.arrowLeft ? -1 : 1;
+            adminCamera.position.x += direction * moveSpeed;
+        }
+        // Up/down (Q/E) - zoom in/out by changing Y (altitude)
+        if (keys.q || keys.e) {
+            const direction = keys.q ? 1 : -1;
+            adminCamera.position.y = Math.max(10, Math.min(500, adminCamera.position.y + direction * moveSpeed));
+        }
+        
+        // Update camera position and ensure it looks straight down
+        camera.position.copy(adminCamera.position);
+        adminCamera.lookAt.set(adminCamera.position.x, 0, adminCamera.position.z);
+        camera.lookAt(adminCamera.lookAt);
+        return; // Skip normal 3D movement logic
+    } else {
+        // Normal 3D movement using camera-relative directions
+        // Forward/backward (Arrow Up/Down or W/S)
+        if (keys.arrowUp || keys.arrowDown) {
+            const direction = keys.arrowUp ? 1 : -1;
+            adminCamera.position.addScaledVector(forward, direction * moveSpeed);
+        }
+        // Left/right (Arrow Left/Right or A/D)
+        if (keys.arrowLeft || keys.arrowRight) {
+            const direction = keys.arrowLeft ? -1 : 1;
+            adminCamera.position.addScaledVector(right, direction * moveSpeed);
+        }
+        // Up/down (Q/E)
+        if (keys.q || keys.e) {
+            const direction = keys.q ? 1 : -1;
+            adminCamera.position.addScaledVector(up, direction * moveSpeed);
+        }
+    }
+    
+    // Update camera position directly
+    camera.position.copy(adminCamera.position);
+    
+    // Update look-at point (for top-down, look straight down; otherwise look forward)
+    if (adminCamera.topDownMode) {
+        adminCamera.lookAt.set(adminCamera.position.x, 0, adminCamera.position.z);
+        camera.lookAt(adminCamera.lookAt);
+    } else {
+        // Look in the direction the camera is facing (or at a point ahead)
+        const lookTarget = adminCamera.position.clone().addScaledVector(forward, 10);
+        adminCamera.lookAt.copy(lookTarget);
+        camera.lookAt(adminCamera.lookAt);
+    }
+}
+
+// Toggle admin camera mode
+function toggleAdminCamera() {
+    adminCamera.enabled = !adminCamera.enabled;
+    
+    if (adminCamera.enabled) {
+        // Enter admin mode: save current camera position
+        adminCamera.position.copy(camera.position);
+        const forward = new THREE.Vector3();
+        camera.getWorldDirection(forward);
+        adminCamera.lookAt.copy(camera.position).addScaledVector(forward, 10);
+        
+        // Show admin mode indicator
+        updateAdminStatus('Admin Camera Mode: ON (Tab to toggle, T for top-down, Space to reset)');
+    } else {
+        // Exit admin mode: camera will resume following vehicle
+        updateAdminStatus('');
+    }
+}
+
+// Toggle top-down view
+function toggleTopDownView() {
+    if (!adminCamera.enabled) return;
+    
+    adminCamera.topDownMode = !adminCamera.topDownMode;
+    
+    if (adminCamera.topDownMode) {
+        // Switch to top-down: position camera above current XZ position
+        const currentX = adminCamera.position.x;
+        const currentZ = adminCamera.position.z;
+        adminCamera.position.set(currentX, 150, currentZ); // 150 meters up for good view
+        adminCamera.lookAt.set(currentX, 0, currentZ); // Look straight down at ground
+        camera.position.copy(adminCamera.position);
+        camera.lookAt(adminCamera.lookAt);
+        camera.rotation.x = -Math.PI / 2; // Ensure camera is looking straight down
+        updateAdminStatus('Top-Down View: ON (Arrows/WASD to pan, Q/E to zoom, T to exit)');
+    } else {
+        // Exit top-down: maintain XZ position but adjust Y for normal 3D view
+        const currentX = adminCamera.position.x;
+        const currentZ = adminCamera.position.z;
+        adminCamera.position.set(currentX, 50, currentZ); // Reasonable height for 3D view
+        // Look at a point ahead
+        adminCamera.lookAt.set(currentX, 0, currentZ - 20); // Look forward
+        camera.position.copy(adminCamera.position);
+        camera.lookAt(adminCamera.lookAt);
+        updateAdminStatus('Top-Down View: OFF (Normal 3D view, T to toggle)');
+    }
+}
+
+// Reset car and camera to initial positions
+function resetCarAndCamera() {
+    // Reset vehicle state
+    vehicle.x = initialCarPosition.x;
+    vehicle.z = initialCarPosition.z;
+    vehicle.angle = initialCarPosition.angle;
+    vehicle.velocity = 0;
+    vehicle.steering = 0;
+    vehicle.steeringActual = 0;
+    vehicle.angularVelocity = 0;
+    vehicle.tilt = 0;
+    vehicle.tiltTarget = 0;
+    
+    // Reset camera
+    if (adminCamera.enabled) {
+        // If in admin mode, reset admin camera position too
+        adminCamera.position.copy(initialCameraPosition);
+        adminCamera.lookAt.copy(initialCameraLookAt);
+        adminCamera.topDownMode = false;
+        camera.position.copy(adminCamera.position);
+        camera.lookAt(adminCamera.lookAt);
+    } else {
+        // Normal mode: reset to follow position
+        camera.position.copy(initialCameraPosition);
+        camera.lookAt(initialCameraLookAt);
+    }
+    
+    // Update car visual position
+    carGroup.position.set(vehicle.x, 0, vehicle.z);
+    carGroup.rotation.y = -vehicle.angle;
+    carGroup.rotation.z = 0;
+    
+    updateAdminStatus(adminCamera.enabled ? 'Admin Camera Mode: ON (Tab to toggle, T for top-down)' : '');
+}
+
+// Update admin status indicator in UI
+function updateAdminStatus(message) {
+    let statusEl = document.getElementById('adminStatus');
+    if (!statusEl) {
+        // Create status element if it doesn't exist
+        statusEl = document.createElement('div');
+        statusEl.id = 'adminStatus';
+        statusEl.style.cssText = 'position: absolute; top: 10px; right: 10px; background: rgba(0,0,0,0.7); color: #ffaa00; padding: 8px 12px; border-radius: 4px; font-family: monospace; font-size: 12px; z-index: 1000;';
+        document.body.appendChild(statusEl);
+    }
+    statusEl.textContent = message;
+}
+
+// Camera follow with smooth interpolation (normal mode)
 function updateCamera() {
+    // If admin mode is enabled, camera is controlled by adminCamera
+    if (adminCamera.enabled) {
+        return; // Camera update is handled in updateAdminCamera
+    }
+    
     // In three.js: X = left/right, Y = up, Z = forward/backward
     // Ground plane is in XZ plane, Y is vertical
     // Car movement: when angle=0, moves forward in -Z direction (toward camera)
@@ -385,14 +648,18 @@ function animate() {
     const deltaTime = Math.min((currentTime - lastTime) / 1000, 0.1); // Cap at 100ms to prevent large jumps
     lastTime = currentTime;
 
-    // Update physics
+    // Update physics (car still moves if it was moving when admin mode activated)
     updatePhysics(deltaTime);
 
     // Update visuals
     updateVehicleVisuals();
 
-    // Update camera
-    updateCamera();
+    // Update camera (handles both normal and admin modes)
+    if (adminCamera.enabled) {
+        updateAdminCamera(deltaTime);
+    } else {
+        updateCamera();
+    }
 
     // Update UI
     updateUI();
@@ -442,7 +709,7 @@ async function loadMapData() {
         // Continue without map data
     }
 }
-
+/*
 // Render roads as continuous ribbons (properly scaled width, fully connected)
 function renderRoads(roads) {
     const roadGroup = new THREE.Group();
@@ -533,6 +800,157 @@ function renderRoads(roads) {
     }
     
     console.log(`Rendered ${roads.length} roads with ${totalSegments} continuous segments`);
+    if (minX !== Infinity) {
+        console.log(`Map bounds: X[${minX.toFixed(1)}, ${maxX.toFixed(1)}], Z[${minZ.toFixed(1)}, ${maxZ.toFixed(1)}]`);
+    }
+}
+*/
+
+// Ultra-optimized: Batch roads by type into single meshes (best for 21k+ roads)
+
+function renderRoads(roads) {
+    // Road type styles
+    const roadTypeStyles = {
+        'motorway': { color: 0x2a2a2a, width: 12 },
+        'trunk': { color: 0x333333, width: 10 },
+        'primary': { color: 0x444444, width: 8 },
+        'secondary': { color: 0x555555, width: 7 },
+        'tertiary': { color: 0x666666, width: 6 },
+        'residential': { color: 0x777777, width: 5 },
+        'unclassified': { color: 0x888888, width: 5 },
+        'service': { color: 0x999999, width: 4 },
+        'living_street': { color: 0x777777, width: 5 }
+    };
+    
+    // Group roads by type for batching
+    const roadsByType = {};
+    
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    
+    roads.forEach(road => {
+        if (road.coordinates.length < 2) return;
+        
+        const roadType = road.type || 'unclassified';
+        if (!roadsByType[roadType]) {
+            roadsByType[roadType] = [];
+        }
+        roadsByType[roadType].push(road);
+    });
+    
+    // Create one mesh per road type (much fewer draw calls)
+    Object.keys(roadsByType).forEach(roadType => {
+        const style = roadTypeStyles[roadType] || { color: 0x666666, width: 5 };
+        const roadWidth = style.width;
+        const color = style.color;
+        const roadsOfType = roadsByType[roadType];
+        
+        const vertices = [];
+        const indices = [];
+        let vertexOffset = 0;
+        
+        roadsOfType.forEach(road => {
+            const roadVertices = [];
+            
+            for (let i = 0; i < road.coordinates.length; i++) {
+                const x = road.coordinates[i][0];
+                const z = road.coordinates[i][1];
+                
+                minX = Math.min(minX, x);
+                maxX = Math.max(maxX, x);
+                minZ = Math.min(minZ, z);
+                maxZ = Math.max(maxZ, z);
+                
+                // Calculate perpendicular direction
+                let perpX = 0, perpZ = 0;
+                
+                if (i === 0 && road.coordinates.length > 1) {
+                    const dx = road.coordinates[i + 1][0] - x;
+                    const dz = road.coordinates[i + 1][1] - z;
+                    const len = Math.sqrt(dx * dx + dz * dz);
+                    if (len > 0.001) {
+                        perpX = -dz / len;
+                        perpZ = dx / len;
+                    }
+                } else if (i === road.coordinates.length - 1) {
+                    const dx = x - road.coordinates[i - 1][0];
+                    const dz = z - road.coordinates[i - 1][1];
+                    const len = Math.sqrt(dx * dx + dz * dz);
+                    if (len > 0.001) {
+                        perpX = -dz / len;
+                        perpZ = dx / len;
+                    }
+                } else {
+                    const dx1 = x - road.coordinates[i - 1][0];
+                    const dz1 = z - road.coordinates[i - 1][1];
+                    const len1 = Math.sqrt(dx1 * dx1 + dz1 * dz1);
+                    
+                    const dx2 = road.coordinates[i + 1][0] - x;
+                    const dz2 = road.coordinates[i + 1][1] - z;
+                    const len2 = Math.sqrt(dx2 * dx2 + dz2 * dz2);
+                    
+                    if (len1 > 0.001 && len2 > 0.001) {
+                        const perp1X = -dz1 / len1;
+                        const perp1Z = dx1 / len1;
+                        const perp2X = -dz2 / len2;
+                        const perp2Z = dx2 / len2;
+                        
+                        perpX = (perp1X + perp2X) / 2;
+                        perpZ = (perp1Z + perp2Z) / 2;
+                        
+                        const perpLen = Math.sqrt(perpX * perpX + perpZ * perpZ);
+                        if (perpLen > 0.001) {
+                            perpX /= perpLen;
+                            perpZ /= perpLen;
+                        }
+                    }
+                }
+                
+                const halfWidth = roadWidth / 2;
+                roadVertices.push(
+                    x + perpX * halfWidth, 0.05, z + perpZ * halfWidth,
+                    x - perpX * halfWidth, 0.05, z - perpZ * halfWidth
+                );
+                
+                if (i < road.coordinates.length - 1) {
+                    const baseIdx = vertexOffset + i * 2;
+                    indices.push(
+                        baseIdx, baseIdx + 1, baseIdx + 2,
+                        baseIdx + 1, baseIdx + 3, baseIdx + 2
+                    );
+                }
+            }
+            
+            vertices.push(...roadVertices);
+            vertexOffset += road.coordinates.length * 2;
+        });
+        
+        // Create single mesh for all roads of this type
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+        geometry.setIndex(indices);
+        geometry.computeVertexNormals();
+        
+        const material = new THREE.MeshLambertMaterial({ 
+            color: color,
+            side: THREE.DoubleSide
+        });
+        
+        const roadMesh = new THREE.Mesh(geometry, material);
+        roadMesh.receiveShadow = true;
+        roadMesh.castShadow = false;
+        
+        scene.add(roadMesh);
+        
+        console.log(`Rendered ${roadsOfType.length} ${roadType} roads in single mesh`);
+    });
+    
+    // Resize ground to fit map
+    if (minX !== Infinity && maxX !== -Infinity) {
+        const mapSize = Math.max(maxX - minX, maxZ - minZ) * 1.2;
+        createGround(mapSize);
+    }
+    
+    console.log(`Total: ${roads.length} roads rendered in ${Object.keys(roadsByType).length} batched meshes`);
     if (minX !== Infinity) {
         console.log(`Map bounds: X[${minX.toFixed(1)}, ${maxX.toFixed(1)}], Z[${minZ.toFixed(1)}, ${maxZ.toFixed(1)}]`);
     }
