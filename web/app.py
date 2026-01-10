@@ -46,6 +46,12 @@ def index():
     return render_template('index.html')
 
 
+@app.route('/simulator')
+def simulator():
+    """Render the 3D simulator page."""
+    return render_template('simulator.html')
+
+
 @app.route('/autocomplete', methods=['GET'])
 def autocomplete():
     """
