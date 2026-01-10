@@ -3,13 +3,13 @@ import * as THREE from 'three';
 // Scene setup
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x87ceeb); // Sky blue
-scene.fog = new THREE.Fog(0x87ceeb, 100, 500);
+scene.fog = new THREE.Fog(0x87ceeb, 200, 2000); // Adjusted for larger map
 
 const camera = new THREE.PerspectiveCamera(
     75,
     window.innerWidth / window.innerHeight,
     0.1,
-    1000
+    5000 // Increased far plane for larger map
 );
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -17,6 +17,10 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.getElementById('container').appendChild(renderer.domElement);
+
+// Map data
+let mapData = null;
+let mapCenter = { x: 0, z: 0 };
 
 // Vehicle state (bicycle model)
 const vehicle = {
@@ -35,21 +39,33 @@ const vehicle = {
     tiltTarget: 0 // target tilt for smooth interpolation
 };
 
-// Ground plane
-const groundGeometry = new THREE.PlaneGeometry(200, 200);
-const groundMaterial = new THREE.MeshLambertMaterial({ 
-    color: 0x90ee90, // Light green grass
-    side: THREE.DoubleSide
-});
-const ground = new THREE.Mesh(groundGeometry, groundMaterial);
-ground.rotation.x = -Math.PI / 2;
-ground.position.y = 0;
-ground.receiveShadow = true;
-scene.add(ground);
+// Ground plane (will be resized when map loads)
+let ground = null;
+let gridHelper = null;
 
-// Grid helper
-const gridHelper = new THREE.GridHelper(200, 50, 0x444444, 0x222222);
-scene.add(gridHelper);
+function createGround(size = 2000) {
+    // Remove old ground if exists
+    if (ground) scene.remove(ground);
+    if (gridHelper) scene.remove(gridHelper);
+    
+    const groundGeometry = new THREE.PlaneGeometry(size, size);
+    const groundMaterial = new THREE.MeshLambertMaterial({ 
+        color: 0x90ee90, // Light green grass
+        side: THREE.DoubleSide
+    });
+    ground = new THREE.Mesh(groundGeometry, groundMaterial);
+    ground.rotation.x = -Math.PI / 2;
+    ground.position.y = 0;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    // Grid helper
+    gridHelper = new THREE.GridHelper(size, size / 50, 0x444444, 0x222222);
+    scene.add(gridHelper);
+}
+
+// Create initial ground
+createGround(2000);
 
 // Vehicle mesh (simple box car)
 const carGroup = new THREE.Group();
@@ -385,5 +401,234 @@ function animate() {
     renderer.render(scene, camera);
 }
 
-// Start animation
-animate();
+// Load and render map data
+async function loadMapData() {
+    const statusEl = document.getElementById('mapStatus');
+    try {
+        statusEl.textContent = "Loading Fremont map...";
+        console.log("Loading map data...");
+        const response = await fetch('/api/map_data');
+        if (!response.ok) {
+            throw new Error('Failed to load map data');
+        }
+        
+        mapData = await response.json();
+        console.log(`Loaded ${mapData.roads.length} road segments and ${mapData.buildings.length} buildings`);
+        
+        statusEl.textContent = "Rendering roads...";
+        // Render roads
+        renderRoads(mapData.roads);
+        
+        statusEl.textContent = "Rendering buildings...";
+        // Render buildings
+        renderBuildings(mapData.buildings);
+        
+        // Debug: optionally show node markers (comment out for production)
+        // renderDebugNodeMarkers(mapData.roads);
+        
+        // Center vehicle at map center (0, 0 after transformation)
+        vehicle.x = 0;
+        vehicle.z = 0;
+        carGroup.position.set(0, 0, 0);
+        
+        statusEl.textContent = `✅ Map loaded: ${mapData.roads.length} roads, ${mapData.buildings.length} buildings`;
+        statusEl.style.color = "#4caf50";
+        
+        console.log("Map data loaded and rendered");
+    } catch (error) {
+        console.error("Error loading map data:", error);
+        statusEl.textContent = "⚠️ Map loading failed - simulator running without map";
+        statusEl.style.color = "#ff4444";
+        // Continue without map data
+    }
+}
+
+// Render roads as continuous ribbons (properly scaled width, fully connected)
+function renderRoads(roads) {
+    const roadGroup = new THREE.Group();
+    
+    // Different colors and widths (in meters) for different road types
+    const roadTypeStyles = {
+        'motorway': { color: 0x2a2a2a, width: 12 },      // ~12m wide (highway lanes)
+        'trunk': { color: 0x333333, width: 10 },         // ~10m wide
+        'primary': { color: 0x444444, width: 8 },        // ~8m wide (main roads)
+        'secondary': { color: 0x555555, width: 7 },      // ~7m wide
+        'tertiary': { color: 0x666666, width: 6 },       // ~6m wide
+        'residential': { color: 0x777777, width: 5 },    // ~5m wide (residential)
+        'unclassified': { color: 0x888888, width: 5 },   // ~5m wide
+        'service': { color: 0x999999, width: 4 },        // ~4m wide (alleys/driveways)
+        'living_street': { color: 0x777777, width: 5 }   // ~5m wide
+    };
+    
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    let totalSegments = 0;
+    
+    // Render each road as a continuous path with properly aligned segments
+    roads.forEach(road => {
+        if (road.coordinates.length < 2) return;
+        
+        const style = roadTypeStyles[road.type] || { color: 0x666666, width: 5 };
+        const roadWidth = style.width;
+        const color = style.color;
+        
+        // Create continuous road segments with proper overlap
+        for (let i = 0; i < road.coordinates.length - 1; i++) {
+            const start = road.coordinates[i];
+            const end = road.coordinates[i + 1];
+            
+            const x1 = start[0];
+            const z1 = start[1];
+            const x2 = end[0];
+            const z2 = end[1];
+            
+            // Track bounds
+            minX = Math.min(minX, x1, x2);
+            maxX = Math.max(maxX, x1, x2);
+            minZ = Math.min(minZ, z1, z2);
+            maxZ = Math.max(maxZ, z1, z2);
+            
+            // Calculate segment length and direction (in XZ plane)
+            const dx = x2 - x1;
+            const dz = z2 - z1;
+            const length = Math.sqrt(dx * dx + dz * dz);
+            
+            // Skip zero-length segments
+            if (length < 0.01) continue;
+            
+            const angle = Math.atan2(dz, dx);
+            
+            // Create box geometry: length along X-axis, height along Y, width along Z
+            // We'll rotate it to align with the road direction
+            const geometry = new THREE.BoxGeometry(length, 0.1, roadWidth);
+            const material = new THREE.MeshLambertMaterial({ 
+                color: color,
+                side: THREE.DoubleSide
+            });
+            
+            const segment = new THREE.Mesh(geometry, material);
+            
+            // Position at midpoint
+            const midX = (x1 + x2) / 2;
+            const midZ = (z1 + z2) / 2;
+            segment.position.set(midX, 0.05, midZ); // Slightly above ground
+            
+            // Rotate around Y-axis to align with road direction
+            // BoxGeometry extends along X-axis by default, so we rotate to match the road angle
+            segment.rotation.y = angle;
+            
+            segment.receiveShadow = true;
+            segment.castShadow = false;
+            
+            roadGroup.add(segment);
+            totalSegments++;
+        }
+    });
+    
+    scene.add(roadGroup);
+    
+    // Resize ground to fit map
+    if (minX !== Infinity && maxX !== -Infinity) {
+        const mapSize = Math.max(maxX - minX, maxZ - minZ) * 1.2;
+        createGround(mapSize);
+    }
+    
+    console.log(`Rendered ${roads.length} roads with ${totalSegments} continuous segments`);
+    if (minX !== Infinity) {
+        console.log(`Map bounds: X[${minX.toFixed(1)}, ${maxX.toFixed(1)}], Z[${minZ.toFixed(1)}, ${maxZ.toFixed(1)}]`);
+    }
+}
+
+// Debug function: Render small markers at node positions to verify connectivity
+function renderDebugNodeMarkers(roads) {
+    const markerGroup = new THREE.Group();
+    const markerGeometry = new THREE.SphereGeometry(1, 8, 8); // 1m radius spheres
+    const markerMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000 }); // Red markers
+    
+    const nodeSet = new Set(); // Track unique nodes to avoid duplicates
+    
+    roads.forEach(road => {
+        road.coordinates.forEach(coord => {
+            const key = `${coord[0].toFixed(2)},${coord[1].toFixed(2)}`;
+            if (!nodeSet.has(key)) {
+                nodeSet.add(key);
+                const marker = new THREE.Mesh(markerGeometry, markerMaterial);
+                marker.position.set(coord[0], 1, coord[1]); // 1m above ground
+                markerGroup.add(marker);
+            }
+        });
+    });
+    
+    scene.add(markerGroup);
+    console.log(`Debug: Rendered ${nodeSet.size} unique node markers`);
+}
+
+// Render buildings as extrusions
+function renderBuildings(buildings) {
+    const buildingGroup = new THREE.Group();
+    
+    // Building material
+    const buildingMaterial = new THREE.MeshLambertMaterial({ 
+        color: 0xcccccc,
+        side: THREE.DoubleSide
+    });
+    
+    let buildingCount = 0;
+    buildings.forEach((building, index) => {
+        if (building.coordinates.length < 3) return;
+        
+        try {
+            // Create building shape from coordinates
+            // In three.js Shape, coordinates are in 2D (x, y) plane
+            // We need to map our (x, z) coordinates to Shape's (x, y)
+            const shape = new THREE.Shape();
+            const firstPoint = building.coordinates[0];
+            shape.moveTo(firstPoint[0], firstPoint[1]); // x=east, z=north -> Shape(x, y)
+            
+            for (let i = 1; i < building.coordinates.length; i++) {
+                const point = building.coordinates[i];
+                shape.lineTo(point[0], point[1]);
+            }
+            shape.lineTo(firstPoint[0], firstPoint[1]); // Close the shape
+            
+            // Extrude building
+            const extrudeSettings = {
+                depth: 5 + Math.random() * 10, // Random height between 5-15 meters
+                bevelEnabled: false
+            };
+            
+            const geometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+            geometry.rotateX(-Math.PI / 2); // Rotate to lay flat on XZ plane
+            geometry.translate(0, 0, 0); // Position at ground level
+            
+            const mesh = new THREE.Mesh(geometry, buildingMaterial);
+            mesh.position.set(0, 0, 0); // Position at origin (coordinates are already transformed)
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            
+            buildingGroup.add(mesh);
+            buildingCount++;
+        } catch (error) {
+            console.warn(`Error rendering building ${index}:`, error);
+        }
+    });
+    
+    scene.add(buildingGroup);
+    console.log(`Rendered ${buildingCount} buildings`);
+}
+
+// Start animation loop immediately (for vehicle controls)
+let animationStarted = false;
+function startAnimation() {
+    if (!animationStarted) {
+        animationStarted = true;
+        animate();
+    }
+}
+
+// Load map data and start animation
+loadMapData().then(() => {
+    startAnimation();
+}).catch((error) => {
+    console.error("Map loading failed, starting simulator without map:", error);
+    startAnimation();
+});

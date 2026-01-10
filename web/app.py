@@ -7,7 +7,12 @@ import sys
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.graph_builder import build_graph, path_to_coordinates
+from core.graph_builder import (
+    build_graph, 
+    path_to_coordinates,
+    extract_map_data_for_rendering,
+    transform_map_data_for_rendering
+)
 from core.spatial_index import build_kd_tree, find_nearest_node
 from core.routing import dijkstra_custom_algorithm
 import networkx as nx
@@ -19,11 +24,12 @@ graph = None
 nodes_dict = None
 kd_tree = None
 node_ids_list = None
+map_data_cache = None  # Cached map data for 3D rendering
 
 
 def load_graph_data():
     """Load graph and build KD-tree on server startup."""
-    global graph, nodes_dict, kd_tree, node_ids_list
+    global graph, nodes_dict, kd_tree, node_ids_list, map_data_cache
     
     print("Loading OSM data and building graph...")
     # Get path to OSM file relative to project root
@@ -38,6 +44,26 @@ def load_graph_data():
     
     print(f"✅ Graph loaded: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
     print(f"✅ KD-tree built: {len(node_ids_list)} nodes indexed (only graph nodes)")
+    
+    # Extract map data for 3D rendering (uses existing RoadGraphHandler from graph_builder.py)
+    print("Extracting map data for 3D rendering...")
+    
+    # Use existing RoadGraphHandler - same tested code that built the graph!
+    map_data = extract_map_data_for_rendering(osm_path)
+    
+    # Calculate center point
+    if map_data['nodes']:
+        lats = [lat for lat, lon in map_data['nodes'].values()]
+        lons = [lon for lat, lon in map_data['nodes'].values()]
+        center_lat = sum(lats) / len(lats)
+        center_lon = sum(lons) / len(lons)
+    else:
+        center_lat = 37.5483
+        center_lon = -121.9886
+    
+    # Transform to local coordinates
+    map_data_cache = transform_map_data_for_rendering(map_data, center_lat, center_lon)
+    print(f"✅ Map data cached: {len(map_data_cache['roads'])} road segments, {len(map_data_cache['buildings'])} buildings")
 
 
 @app.route('/')
@@ -50,6 +76,19 @@ def index():
 def simulator():
     """Render the 3D simulator page."""
     return render_template('simulator.html')
+
+
+@app.route('/api/map_data')
+def get_map_data():
+    """
+    Get map data (roads and buildings) for 3D rendering.
+    Returns cached data in local Cartesian coordinates (meters).
+    Uses data already extracted during server startup.
+    """
+    if map_data_cache is None:
+        return jsonify({'error': 'Map data not loaded yet'}), 503
+    
+    return jsonify(map_data_cache)
 
 
 @app.route('/autocomplete', methods=['GET'])

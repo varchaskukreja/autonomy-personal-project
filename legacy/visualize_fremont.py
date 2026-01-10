@@ -60,8 +60,9 @@ def main():
     # Load Fremont OSM data
     print("Loading OSM data...")
     handler = MapHandler()
-    # Use path relative to project root
-    osm_path = os.path.join(os.path.dirname(__file__), "data", "osm", "fremont_raw.osm")
+    # Use path relative to project root (go up one level from legacy/)
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    osm_path = os.path.join(project_root, "data", "osm", "fremont_raw.osm")
     handler.apply_file(osm_path)
     
     # Extract coordinates
