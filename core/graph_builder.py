@@ -245,6 +245,7 @@ def latlon_to_local_meters(lat: float, lon: float, center_lat: float, center_lon
 def transform_map_data_for_rendering(map_data: Dict, center_lat: float, center_lon: float) -> Dict:
     """
     Transform map data from lat/lon to local Cartesian coordinates for 3D rendering.
+    Applies -4.80 degree rotation to buildings to align them with roads.
     
     Args:
         map_data: Output from extract_map_data_for_rendering()
@@ -253,6 +254,15 @@ def transform_map_data_for_rendering(map_data: Dict, center_lat: float, center_l
     Returns:
         Transformed map data with coordinates in meters
     """
+    import math
+    
+    # Building rotation correction (clockwise by 4.80 degrees)
+    BUILDING_ROTATION_DEGREES = -4.80
+    rotation_rad = math.radians(BUILDING_ROTATION_DEGREES)
+    cos_r = math.cos(rotation_rad)
+    sin_r = math.sin(rotation_rad)
+    
+    # Transform roads (no rotation needed)
     transformed_roads = []
     for road in map_data['roads']:
         transformed_coords = []
@@ -264,12 +274,21 @@ def transform_map_data_for_rendering(map_data: Dict, center_lat: float, center_l
             'type': road.get('type', 'road')
         })
     
+    # Transform buildings with rotation correction
     transformed_buildings = []
     for building in map_data['buildings']:
         transformed_coords = []
         for lat, lon in building['coordinates']:
+            # First convert to local coordinates
             x, z = latlon_to_local_meters(lat, lon, center_lat, center_lon)
-            transformed_coords.append((x, z))
+            
+            # Apply rotation around origin (0, 0) - clockwise by 4.80 degrees
+            # Rotation matrix: [cos -sin]  [x]
+            #                  [sin  cos]  [z]
+            rotated_x = x * cos_r - z * sin_r
+            rotated_z = x * sin_r + z * cos_r
+            
+            transformed_coords.append((rotated_x, rotated_z))
         transformed_buildings.append({
             'coordinates': transformed_coords
         })
