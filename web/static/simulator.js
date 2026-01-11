@@ -132,6 +132,10 @@ const initialCarPosition = { x: 0, z: 0, angle: 0 };
 const initialCameraPosition = camera.position.clone();
 const initialCameraLookAt = carGroup.position.clone();
 
+// Spawn position (set when teleporting, used for reset) 
+let spawnPosition = null;
+let spawnMarker = null;
+
 // Admin camera mode state
 const adminCamera = {
     enabled: false,
@@ -532,10 +536,13 @@ function toggleTopDownView() {
 
 // Reset car and camera to initial positions
 function resetCarAndCamera() {
+    // Use spawn position if available (from teleport), otherwise use initial position
+    const resetPos = spawnPosition || initialCarPosition;
+    
     // Reset vehicle state
-    vehicle.x = initialCarPosition.x;
-    vehicle.z = initialCarPosition.z;
-    vehicle.angle = initialCarPosition.angle;
+    vehicle.x = resetPos.x;
+    vehicle.z = resetPos.z;
+    vehicle.angle = resetPos.angle || 0;
     vehicle.velocity = 0;
     vehicle.steering = 0;
     vehicle.steeringActual = 0;
@@ -546,15 +553,36 @@ function resetCarAndCamera() {
     // Reset camera
     if (adminCamera.enabled) {
         // If in admin mode, reset admin camera position too
-        adminCamera.position.copy(initialCameraPosition);
-        adminCamera.lookAt.copy(initialCameraLookAt);
+        if (spawnPosition) {
+            // Position camera behind car at spawn location
+            const spawnCameraOffset = new THREE.Vector3(0, 8, 10);
+            adminCamera.position.set(
+                spawnPosition.x + spawnCameraOffset.x,
+                spawnPosition.y + spawnCameraOffset.y,
+                spawnPosition.z + spawnCameraOffset.z
+            );
+            adminCamera.lookAt.set(spawnPosition.x, 0, spawnPosition.z);
+        } else {
+            adminCamera.position.copy(initialCameraPosition);
+            adminCamera.lookAt.copy(initialCameraLookAt);
+        }
         adminCamera.topDownMode = false;
         camera.position.copy(adminCamera.position);
         camera.lookAt(adminCamera.lookAt);
     } else {
-        // Normal mode: reset to follow position
-        camera.position.copy(initialCameraPosition);
-        camera.lookAt(initialCameraLookAt);
+        // Normal mode: reset to follow position behind spawn/initial location
+        if (spawnPosition) {
+            const spawnCameraOffset = new THREE.Vector3(0, 8, 10);
+            camera.position.set(
+                spawnPosition.x + spawnCameraOffset.x,
+                spawnPosition.y + spawnCameraOffset.y,
+                spawnPosition.z + spawnCameraOffset.z
+            );
+            camera.lookAt(spawnPosition.x, 0, spawnPosition.z);
+        } else {
+            camera.position.copy(initialCameraPosition);
+            camera.lookAt(initialCameraLookAt);
+        }
     }
     
     // Update car visual position
@@ -563,6 +591,196 @@ function resetCarAndCamera() {
     carGroup.rotation.z = 0;
     
     updateAdminStatus(adminCamera.enabled ? 'Admin Camera Mode: ON (Tab to toggle, T for top-down)' : '');
+}
+
+// Create spawn marker visualization (green sphere)
+function createSpawnMarker(x, y, z) {
+    // Remove existing marker if present
+    if (spawnMarker) {
+        scene.remove(spawnMarker);
+        spawnMarker = null;
+    }
+    
+    // Create green marker sphere
+    const markerGeometry = new THREE.SphereGeometry(2, 16, 16);
+    const markerMaterial = new THREE.MeshPhongMaterial({ 
+        color: 0x00ff00,
+        emissive: 0x00ff00,
+        emissiveIntensity: 0.5,
+        transparent: true,
+        opacity: 0.8
+    });
+    spawnMarker = new THREE.Mesh(markerGeometry, markerMaterial);
+    spawnMarker.position.set(x, y + 1, z);
+    
+    // Add pulsing animation helper
+    spawnMarker.userData.originalScale = 1.0;
+    spawnMarker.userData.pulseSpeed = 0.02;
+    
+    scene.add(spawnMarker);
+}
+
+// Teleport car to a real-world location
+async function teleportCar(address = null, lat = null, lon = null, yaw = 0) {
+    const statusEl = document.getElementById('teleportStatus');
+    if (statusEl) {
+        statusEl.textContent = 'Teleporting...';
+        statusEl.style.color = '#ffaa00';
+    }
+    
+    try {
+        // Build request payload
+        const payload = {};
+        if (address) {
+            payload.address = address;
+        } else if (lat !== null && lon !== null) {
+            payload.lat = parseFloat(lat);
+            payload.lon = parseFloat(lon);
+        } else {
+            throw new Error('Either address or lat/lon must be provided');
+        }
+        if (yaw !== null && yaw !== undefined) {
+            payload.yaw = parseFloat(yaw);
+        }
+        
+        // Call teleport API
+        const response = await fetch('/api/teleport', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload)
+        });
+        
+        const data = await response.json();
+        
+        if (!response.ok) {
+            throw new Error(data.error || 'Teleportation failed');
+        }
+        
+        if (!data.success) {
+            throw new Error('Teleportation failed: ' + (data.error || 'Unknown error'));
+        }
+        
+        // Update vehicle position
+        const pos = data.position;
+        vehicle.x = pos.x;
+        vehicle.z = pos.z;
+        vehicle.angle = -data.yaw_rad; // Negative because our angle system is inverted
+        
+        // Store spawn position for reset
+        spawnPosition = {
+            x: pos.x,
+            y: pos.y,
+            z: pos.z,
+            angle: vehicle.angle
+        };
+        
+        // Update camera positions
+        const spawnCameraOffset = new THREE.Vector3(0, 8, 10);
+        initialCameraPosition.set(
+            pos.x + spawnCameraOffset.x,
+            pos.y + spawnCameraOffset.y,
+            pos.z + spawnCameraOffset.z
+        );
+        initialCameraLookAt.set(pos.x, 0, pos.z);
+        
+        // Reset vehicle state
+        vehicle.velocity = 0;
+        vehicle.steering = 0;
+        vehicle.steeringActual = 0;
+        vehicle.angularVelocity = 0;
+        vehicle.tilt = 0;
+        vehicle.tiltTarget = 0;
+        
+        // Update car visual position
+        carGroup.position.set(vehicle.x, 0, vehicle.z);
+        carGroup.rotation.y = -vehicle.angle;
+        carGroup.rotation.z = 0;
+        
+        // Reset camera to follow position
+        if (!adminCamera.enabled) {
+            camera.position.copy(initialCameraPosition);
+            camera.lookAt(initialCameraLookAt);
+        } else {
+            adminCamera.position.copy(initialCameraPosition);
+            adminCamera.lookAt.copy(initialCameraLookAt);
+            camera.position.copy(adminCamera.position);
+            camera.lookAt(adminCamera.lookAt);
+        }
+        
+        // Create spawn marker
+        createSpawnMarker(pos.x, pos.y, pos.z);
+        
+        // Update status
+        if (statusEl) {
+            statusEl.textContent = `✓ Teleported to: ${data.address || `${data.lat.toFixed(6)}, ${data.lon.toFixed(6)}`}`;
+            statusEl.style.color = '#4CAF50';
+        }
+        
+        console.log(`Teleported to: ${data.address || `${data.lat}, ${data.lon}`} (node ${data.node_id})`);
+        console.log(`Simulator position: (${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)})`);
+        
+    } catch (error) {
+        console.error('Teleportation error:', error);
+        if (statusEl) {
+            statusEl.textContent = `✗ Error: ${error.message}`;
+            statusEl.style.color = '#ff4444';
+        }
+    }
+}
+
+// Wire up teleport button and input handlers (run after DOM is ready)
+function setupTeleportUI() {
+    const teleportBtn = document.getElementById('teleportBtn');
+    const addressInput = document.getElementById('teleportAddress');
+    const latInput = document.getElementById('teleportLat');
+    const lonInput = document.getElementById('teleportLon');
+    const yawInput = document.getElementById('teleportYaw');
+    
+    if (!teleportBtn) {
+        // Retry if DOM not ready yet
+        setTimeout(setupTeleportUI, 100);
+        return;
+    }
+    
+    teleportBtn.addEventListener('click', () => {
+        const address = addressInput?.value.trim() || null;
+        const lat = latInput?.value ? parseFloat(latInput.value) : null;
+        const lon = lonInput?.value ? parseFloat(lonInput.value) : null;
+        const yaw = yawInput?.value ? parseFloat(yawInput.value) : 0;
+        
+        // If address is provided, use it; otherwise use lat/lon
+        if (address) {
+            teleportCar(address, null, null, yaw);
+        } else if (lat !== null && lon !== null && !isNaN(lat) && !isNaN(lon)) {
+            teleportCar(null, lat, lon, yaw);
+        } else {
+            const statusEl = document.getElementById('teleportStatus');
+            if (statusEl) {
+                statusEl.textContent = '✗ Please enter an address or lat/lon coordinates';
+                statusEl.style.color = '#ff4444';
+            }
+        }
+    });
+    
+    // Allow Enter key to trigger teleportation
+    [addressInput, latInput, lonInput, yawInput].forEach(input => {
+        if (input) {
+            input.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    teleportBtn.click();
+                }
+            });
+        }
+    });
+}
+
+// Setup teleport UI when DOM is ready
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', setupTeleportUI);
+} else {
+    setupTeleportUI();
 }
 
 // Update admin status indicator in UI
@@ -663,6 +881,16 @@ function animate() {
 
     // Update UI
     updateUI();
+    
+    // Animate spawn marker (pulsing effect)
+    if (spawnMarker && spawnMarker.userData) {
+        spawnMarker.userData.originalScale += spawnMarker.userData.pulseSpeed;
+        if (spawnMarker.userData.originalScale > 1.2 || spawnMarker.userData.originalScale < 1.0) {
+            spawnMarker.userData.pulseSpeed *= -1;
+        }
+        const scale = 1.0 + 0.2 * Math.sin(spawnMarker.userData.originalScale);
+        spawnMarker.scale.set(scale, scale, scale);
+    }
 
     // Render
     renderer.render(scene, camera);
@@ -995,18 +1223,26 @@ function renderBuildings(buildings) {
         if (building.coordinates.length < 3) return;
         
         try {
-            // Create building shape from coordinates
-            // In three.js Shape, coordinates are in 2D (x, y) plane
-            // We need to map our (x, z) coordinates to Shape's (x, y)
+            // Calculate building centroid for proper positioning
+            let centroidX = 0, centroidZ = 0;
+            for (const coord of building.coordinates) {
+                centroidX += coord[0];
+                centroidZ += coord[1];
+            }
+            centroidX /= building.coordinates.length;
+            centroidZ /= building.coordinates.length;
+            
+            // Create building shape from coordinates relative to centroid
+            // THREE.Shape uses coordinates relative to its origin, so we offset by centroid
             const shape = new THREE.Shape();
             const firstPoint = building.coordinates[0];
-            shape.moveTo(firstPoint[0], firstPoint[1]); // x=east, z=north -> Shape(x, y)
+            shape.moveTo(firstPoint[0] - centroidX, firstPoint[1] - centroidZ); // Offset by centroid
             
             for (let i = 1; i < building.coordinates.length; i++) {
                 const point = building.coordinates[i];
-                shape.lineTo(point[0], point[1]);
+                shape.lineTo(point[0] - centroidX, point[1] - centroidZ); // Offset by centroid
             }
-            shape.lineTo(firstPoint[0], firstPoint[1]); // Close the shape
+            shape.lineTo(firstPoint[0] - centroidX, firstPoint[1] - centroidZ); // Close the shape
             
             // Extrude building
             const extrudeSettings = {
@@ -1015,11 +1251,12 @@ function renderBuildings(buildings) {
             };
             
             const geometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
-            geometry.rotateX(-Math.PI / 2); // Rotate to lay flat on XZ plane
-            geometry.translate(0, 0, 0); // Position at ground level
+            geometry.rotateX(-Math.PI / 2); // Rotate to lay flat on XZ plane (Shape XY -> World XZ)
             
             const mesh = new THREE.Mesh(geometry, buildingMaterial);
-            mesh.position.set(0, 0, 0); // Position at origin (coordinates are already transformed)
+            // Position mesh at building's centroid in world space
+            // After rotateX(-PI/2), Shape's Y becomes world Z, so we use (centroidX, 0, centroidZ)
+            mesh.position.set(centroidX, 0, centroidZ);
             mesh.castShadow = true;
             mesh.receiveShadow = true;
             
