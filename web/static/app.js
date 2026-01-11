@@ -163,6 +163,19 @@ document.getElementById('routeForm').addEventListener('submit', async function(e
 
         // Display results
         displayResults(latlonData, routeData);
+        
+        // Store route data for simulator autopilot
+        if (routeData.waypoints && routeData.waypoints.length > 0) {
+            const routePayload = {
+                waypoints: routeData.waypoints,
+                start_address: startAddress,
+                end_address: endAddress,
+                distance: routeData.distance,
+                num_nodes: routeData.num_nodes
+            };
+            localStorage.setItem('autopilot_route', JSON.stringify(routePayload));
+            console.log('Route stored for autopilot:', routePayload);
+        }
 
     } catch (error) {
         console.error('Route computation error:', error);
@@ -211,11 +224,19 @@ function displayResults(latlonData, routeData) {
         </details>
     `;
 
-    // Status message
+    // Status message with simulator launch button
     statusDiv.innerHTML = `
         <strong>✅ Route computed successfully!</strong><br>
-        Ready for CARLA simulation. The path contains ${routeData.num_nodes} nodes covering ${routeData.distance_km.toFixed(2)} km.
+        The path contains ${routeData.num_nodes} nodes covering ${routeData.distance_km.toFixed(2)} km.<br><br>
+        <button id="launchSimulatorBtn" class="btn-primary" style="margin-top: 10px;">
+            🚗 Launch Simulator & Start Autopilot
+        </button>
     `;
+    
+    // Add click handler for simulator launch button
+    document.getElementById('launchSimulatorBtn').addEventListener('click', function() {
+        window.location.href = '/simulator';
+    });
 
     resultsDiv.classList.remove('hidden');
 }
