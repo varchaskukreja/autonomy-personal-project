@@ -1315,7 +1315,9 @@ function latlonToSimulatorCoords(lat, lon, centerLat, centerLon) {
     const centerLonRad = centerLon * Math.PI / 180;
     
     // Calculate offsets in meters (x = east, z = north)
-    const x = R * (lonRad - centerLonRad) * Math.abs(Math.cos(centerLatRad));
+    // Note: X is negated to fix left-right mirror inversion
+    // This ensures the simulator matches real-world orientation
+    const x = -R * (lonRad - centerLonRad) * Math.abs(Math.cos(centerLatRad));
     const z = R * (latRad - centerLatRad);
     
     // Validate outputs

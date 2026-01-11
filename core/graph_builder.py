@@ -236,7 +236,9 @@ def latlon_to_local_meters(lat: float, lon: float, center_lat: float, center_lon
     center_lon_rad = math.radians(center_lon)
     
     # Calculate offsets in meters
-    x = R * (lon_rad - center_lon_rad) * abs(math.cos(center_lat_rad))
+    # Note: X is negated to fix left-right mirror inversion
+    # This ensures the simulator matches real-world orientation
+    x = -R * (lon_rad - center_lon_rad) * abs(math.cos(center_lat_rad))
     z = R * (lat_rad - center_lat_rad)
     
     return (x, z)
