@@ -3,6 +3,7 @@ import requests
 import time
 import os
 import sys
+import math
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -25,11 +26,13 @@ nodes_dict = None
 kd_tree = None
 node_ids_list = None
 map_data_cache = None  # Cached map data for 3D rendering
+map_center_lat = None  # Map center latitude (for coordinate transformation)
+map_center_lon = None  # Map center longitude (for coordinate transformation)
 
 
 def load_graph_data():
     """Load graph and build KD-tree on server startup."""
-    global graph, nodes_dict, kd_tree, node_ids_list, map_data_cache
+    global graph, nodes_dict, kd_tree, node_ids_list, map_data_cache, map_center_lat, map_center_lon
     
     print("Loading OSM data and building graph...")
     # Get path to OSM file relative to project root
@@ -61,9 +64,14 @@ def load_graph_data():
         center_lat = 37.5483
         center_lon = -121.9886
     
+    # Store center coordinates globally for coordinate transformation
+    map_center_lat = center_lat
+    map_center_lon = center_lon
+    
     # Transform to local coordinates
     map_data_cache = transform_map_data_for_rendering(map_data, center_lat, center_lon)
     print(f"✅ Map data cached: {len(map_data_cache['roads'])} road segments, {len(map_data_cache['buildings'])} buildings")
+    print(f"✅ Map center: ({map_center_lat:.6f}, {map_center_lon:.6f})")
     
     # Analyze coordinate overlap for debugging (called after map_data_cache is set)
     analyze_coordinate_overlap()
@@ -168,6 +176,115 @@ def get_map_data():
         return jsonify({'error': 'Map data not loaded yet'}), 503
     
     return jsonify(map_data_cache)
+
+
+@app.route('/api/teleport', methods=['POST'])
+def teleport():
+    """
+    Teleport car to a real-world location (address or lat/lon).
+    Returns simulator coordinates (x, y, z) for spawning the car.
+    """
+    if map_data_cache is None or map_center_lat is None or map_center_lon is None:
+        return jsonify({'error': 'Map data not loaded yet'}), 503
+    
+    data = request.get_json()
+    address = data.get('address', '').strip()
+    lat = data.get('lat')
+    lon = data.get('lon')
+    yaw = data.get('yaw', 0.0)  # Optional initial orientation (degrees)
+    
+    try:
+        from core.graph_builder import latlon_to_local_meters
+        
+        # If address provided, geocode it
+        if address:
+            def geocode_address(addr):
+                url = "https://nominatim.openstreetmap.org/search"
+                params = {
+                    'q': addr,
+                    'format': 'json',
+                    'limit': 1,
+                    'addressdetails': 1,
+                }
+                headers = {
+                    'User-Agent': 'Fremont-Routing-App/1.0'
+                }
+                
+                import time
+                time.sleep(1)  # Rate limiting
+                response = requests.get(url, params=params, headers=headers, timeout=5)
+                response.raise_for_status()
+                
+                results = response.json()
+                if results:
+                    return {
+                        'lat': float(results[0]['lat']),
+                        'lon': float(results[0]['lon']),
+                        'display_name': results[0].get('display_name', addr)
+                    }
+                return None
+            
+            geocode_result = geocode_address(address)
+            if not geocode_result:
+                return jsonify({'error': f'Could not geocode address: {address}'}), 400
+            
+            lat = geocode_result['lat']
+            lon = geocode_result['lon']
+            display_name = geocode_result['display_name']
+        elif lat is None or lon is None:
+            return jsonify({'error': 'Either address or lat/lon must be provided'}), 400
+        else:
+            try:
+                lat = float(lat)
+                lon = float(lon)
+            except (ValueError, TypeError):
+                return jsonify({'error': 'Invalid lat/lon values'}), 400
+            display_name = f'{lat:.6f}, {lon:.6f}'
+        
+        # Validate coordinates are within reasonable bounds (Fremont area)
+        if lat < 37.4 or lat > 37.6 or lon < -122.1 or lon > -121.9:
+            return jsonify({
+                'error': f'Coordinates ({lat:.6f}, {lon:.6f}) are outside Fremont map bounds',
+                'bounds': {'lat': [37.4, 37.6], 'lon': [-122.1, -121.9]}
+            }), 400
+        
+        # Find nearest road node using KD-tree
+        nearest_node = find_nearest_node(lat, lon, kd_tree, node_ids_list)
+        
+        # Verify node is in graph
+        if nearest_node not in graph:
+            return jsonify({'error': f'Nearest node {nearest_node} not in graph. This should not happen.'}), 500
+        
+        # Get node's lat/lon
+        node_lat, node_lon = nodes_dict[nearest_node]
+        
+        # Convert to simulator coordinates (meters)
+        x, z = latlon_to_local_meters(node_lat, node_lon, map_center_lat, map_center_lon)
+        y = 1.0  # Road height (meters above ground)
+        
+        # Convert yaw to radians
+        yaw_rad = math.radians(float(yaw))
+        
+        return jsonify({
+            'success': True,
+            'address': display_name if address else None,
+            'lat': node_lat,
+            'lon': node_lon,
+            'node_id': nearest_node,
+            'position': {
+                'x': x,
+                'y': y,
+                'z': z
+            },
+            'yaw': float(yaw),
+            'yaw_rad': yaw_rad
+        })
+    
+    except Exception as e:
+        print(f"Error in teleport: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 
 
