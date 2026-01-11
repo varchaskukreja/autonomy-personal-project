@@ -302,8 +302,76 @@ const MIN_TURNING_RADIUS = 4.0; // meters - minimum realistic turning radius
 const TURN_SPEED_REDUCTION = 0.4; // how much speed is reduced during turns (0-1, higher = more reduction)
 const BASE_MAX_SPEED = 25.0; // m/s (~56 mph) - base max speed
 
+// Validate and sanitize vehicle state (prevent NaN/Infinity bugs)
+function validateVehicleState() {
+    // Validate position
+    if (!isFinite(vehicle.x) || !isFinite(vehicle.z)) {
+        console.warn('Invalid vehicle position detected, resetting to (0, 0)');
+        vehicle.x = 0;
+        vehicle.z = 0;
+    }
+    
+    // Clamp position to reasonable bounds (prevent car from flying thousands of meters away)
+    // Assuming map is roughly within ±5000 meters from center
+    const MAX_POSITION = 10000; // 10km max distance from origin
+    if (Math.abs(vehicle.x) > MAX_POSITION || Math.abs(vehicle.z) > MAX_POSITION) {
+        console.warn(`Vehicle position out of bounds: (${vehicle.x.toFixed(2)}, ${vehicle.z.toFixed(2)}), resetting to (0, 0)`);
+        vehicle.x = 0;
+        vehicle.z = 0;
+        vehicle.velocity = 0; // Stop the vehicle if it's way out of bounds
+    }
+    
+    // Validate angle (normalize to [-PI, PI])
+    if (!isFinite(vehicle.angle)) {
+        console.warn('Invalid vehicle angle detected, resetting to 0');
+        vehicle.angle = 0;
+    } else {
+        // Normalize angle to [-PI, PI] range
+        while (vehicle.angle > Math.PI) vehicle.angle -= 2 * Math.PI;
+        while (vehicle.angle < -Math.PI) vehicle.angle += 2 * Math.PI;
+    }
+    
+    // Validate velocity
+    if (!isFinite(vehicle.velocity)) {
+        console.warn('Invalid vehicle velocity detected, resetting to 0');
+        vehicle.velocity = 0;
+    } else {
+        // Clamp velocity to reasonable bounds
+        vehicle.velocity = Math.max(-BASE_MAX_SPEED * 2, Math.min(BASE_MAX_SPEED * 2, vehicle.velocity));
+    }
+    
+    // Validate steering
+    if (!isFinite(vehicle.steering)) {
+        vehicle.steering = 0;
+    } else {
+        vehicle.steering = Math.max(-vehicle.maxSteeringAngle, Math.min(vehicle.maxSteeringAngle, vehicle.steering));
+    }
+    
+    if (!isFinite(vehicle.steeringActual)) {
+        vehicle.steeringActual = 0;
+    } else {
+        vehicle.steeringActual = Math.max(-vehicle.maxSteeringAngle, Math.min(vehicle.maxSteeringAngle, vehicle.steeringActual));
+    }
+    
+    // Validate angular velocity
+    if (!isFinite(vehicle.angularVelocity)) {
+        vehicle.angularVelocity = 0;
+    } else {
+        vehicle.angularVelocity = Math.max(-MAX_ANGULAR_VELOCITY * 2, Math.min(MAX_ANGULAR_VELOCITY * 2, vehicle.angularVelocity));
+    }
+}
+
 // Bicycle model physics
 function updatePhysics(deltaTime) {
+    // Validate deltaTime (prevent huge jumps from tab inactivity or invalid values)
+    if (!isFinite(deltaTime) || deltaTime <= 0 || deltaTime > 0.1) {
+        console.warn(`Invalid deltaTime: ${deltaTime}, clamping to 0.016`);
+        deltaTime = 0.016; // ~60 FPS
+    }
+    
+    // Validate vehicle state before physics update
+    validateVehicleState();
+    
     // Manual controls only if autopilot is disabled
     if (!autopilot.enabled) {
         // Steering input (target steering) - only if admin mode is off
@@ -354,8 +422,11 @@ function updatePhysics(deltaTime) {
         }
     }
 
-    // Update velocity
-    vehicle.velocity += vehicle.acceleration * deltaTime;
+    // Update velocity (with validation)
+    const velocityDelta = vehicle.acceleration * deltaTime;
+    if (isFinite(velocityDelta)) {
+        vehicle.velocity += velocityDelta;
+    }
     
     // Speed reduction during turns (realistic: can't maintain max speed while turning sharply)
     // More steering = more speed reduction
@@ -363,8 +434,12 @@ function updatePhysics(deltaTime) {
     const speedReductionFactor = 1.0 - (steeringFactor * TURN_SPEED_REDUCTION); // 1.0 to 0.6
     const effectiveMaxSpeed = BASE_MAX_SPEED * speedReductionFactor;
     
-    // Clamp velocity with turn-based max speed
-    vehicle.velocity = Math.max(-effectiveMaxSpeed * 0.5, Math.min(effectiveMaxSpeed, vehicle.velocity));
+    // Clamp velocity with turn-based max speed (with validation)
+    if (isFinite(vehicle.velocity)) {
+        vehicle.velocity = Math.max(-effectiveMaxSpeed * 0.5, Math.min(effectiveMaxSpeed, vehicle.velocity));
+    } else {
+        vehicle.velocity = 0;
+    }
 
     // Only allow turning when moving (more realistic - cars can't turn in place)
     const effectiveSteering = Math.abs(vehicle.velocity) > MIN_SPEED_FOR_TURN 
@@ -374,18 +449,34 @@ function updatePhysics(deltaTime) {
     // Bicycle model equations - use actual smoothed steering
     // θ += (v / L) * tan(δ) * dt
     // Only turn if moving
-    if (Math.abs(vehicle.velocity) > MIN_SPEED_FOR_TURN) {
-        // Calculate angular velocity from bicycle model
-        let angularVel = (vehicle.velocity / vehicle.wheelbase) * Math.tan(effectiveSteering);
-        
-        // Limit angular velocity to prevent instant 360s and unrealistic turning
-        // This enforces a minimum turning radius based on speed
-        const maxAngularVel = Math.abs(vehicle.velocity) / MIN_TURNING_RADIUS;
-        angularVel = Math.max(-Math.min(MAX_ANGULAR_VELOCITY, maxAngularVel), 
-                             Math.min(MAX_ANGULAR_VELOCITY, maxAngularVel, angularVel));
-        
-        vehicle.angularVelocity = angularVel;
-        vehicle.angle += vehicle.angularVelocity * deltaTime;
+    if (Math.abs(vehicle.velocity) > MIN_SPEED_FOR_TURN && isFinite(vehicle.velocity) && isFinite(effectiveSteering)) {
+        // Calculate angular velocity from bicycle model (with validation)
+        if (vehicle.wheelbase > 0.001) { // Prevent division by zero
+            let angularVel = (vehicle.velocity / vehicle.wheelbase) * Math.tan(effectiveSteering);
+            
+            // Validate angular velocity calculation
+            if (!isFinite(angularVel)) {
+                angularVel = 0;
+            }
+            
+            // Limit angular velocity to prevent instant 360s and unrealistic turning
+            // This enforces a minimum turning radius based on speed
+            const maxAngularVel = Math.abs(vehicle.velocity) / MIN_TURNING_RADIUS;
+            if (isFinite(maxAngularVel)) {
+                angularVel = Math.max(-Math.min(MAX_ANGULAR_VELOCITY, maxAngularVel), 
+                                     Math.min(MAX_ANGULAR_VELOCITY, maxAngularVel, angularVel));
+            }
+            
+            vehicle.angularVelocity = angularVel;
+            
+            // Update angle with validation
+            const angleDelta = vehicle.angularVelocity * deltaTime;
+            if (isFinite(angleDelta)) {
+                vehicle.angle += angleDelta;
+            }
+        } else {
+            vehicle.angularVelocity = 0;
+        }
     } else {
         // No turning when stationary or moving too slowly
         vehicle.angularVelocity = 0;
@@ -395,8 +486,24 @@ function updatePhysics(deltaTime) {
     // For angle=0, we want to move forward (negative Z direction)
     // x += v * sin(θ) * dt (horizontal movement)
     // z -= v * cos(θ) * dt (forward movement, negative because +Z goes into screen)
-    vehicle.x += vehicle.velocity * Math.sin(vehicle.angle) * deltaTime;
-    vehicle.z -= vehicle.velocity * Math.cos(vehicle.angle) * deltaTime;
+    // Validate all values before position update
+    if (isFinite(vehicle.velocity) && isFinite(vehicle.angle) && isFinite(deltaTime)) {
+        const sinAngle = Math.sin(vehicle.angle);
+        const cosAngle = Math.cos(vehicle.angle);
+        
+        if (isFinite(sinAngle) && isFinite(cosAngle)) {
+            const dx = vehicle.velocity * sinAngle * deltaTime;
+            const dz = vehicle.velocity * cosAngle * deltaTime;
+            
+            if (isFinite(dx) && isFinite(dz)) {
+                vehicle.x += dx;
+                vehicle.z -= dz;
+            }
+        }
+    }
+    
+    // Final validation after position update
+    validateVehicleState();
 
     // Calculate tilt target based on angular velocity and speed (SlowRoads.io style)
     // More tilt when turning fast at high speed
@@ -697,11 +804,22 @@ async function teleportCar(address = null, lat = null, lon = null, yaw = 0) {
             throw new Error('Teleportation failed: ' + (data.error || 'Unknown error'));
         }
         
-        // Update vehicle position
+        // Update vehicle position (with validation)
         const pos = data.position;
+        if (!pos || !isFinite(pos.x) || !isFinite(pos.z)) {
+            throw new Error('Invalid position received from server');
+        }
+        if (!isFinite(data.yaw_rad)) {
+            console.warn('Invalid yaw_rad, using 0');
+            data.yaw_rad = 0;
+        }
+        
         vehicle.x = pos.x;
         vehicle.z = pos.z;
         vehicle.angle = -data.yaw_rad; // Negative because our angle system is inverted
+        
+        // Validate after setting
+        validateVehicleState();
         
         // Store spawn position for reset
         spawnPosition = {
@@ -975,10 +1093,28 @@ function updateAutopilot(deltaTime) {
     
     const currentWp = autopilot.waypoints[autopilot.currentWaypointIndex];
     
-    // Calculate distance to current waypoint
+    // Validate waypoint coordinates
+    if (!currentWp || !isFinite(currentWp.x) || !isFinite(currentWp.z)) {
+        console.error(`Invalid waypoint at index ${autopilot.currentWaypointIndex}:`, currentWp);
+        autopilot.currentWaypointIndex++;
+        return;
+    }
+    
+    // Calculate distance to current waypoint (with validation)
     const dx = currentWp.x - vehicle.x;
     const dz = currentWp.z - vehicle.z;
+    
+    if (!isFinite(dx) || !isFinite(dz)) {
+        console.error('Invalid position difference in autopilot calculation');
+        return;
+    }
+    
     const distance = Math.sqrt(dx * dx + dz * dz);
+    
+    if (!isFinite(distance)) {
+        console.error('Invalid distance calculation in autopilot');
+        return;
+    }
     
     // Check if waypoint reached
     if (distance < autopilot.waypointThreshold) {
@@ -996,13 +1132,36 @@ function updateAutopilot(deltaTime) {
     
     // Get current target waypoint
     const targetWp = autopilot.waypoints[autopilot.currentWaypointIndex];
+    
+    // Validate target waypoint
+    if (!targetWp || !isFinite(targetWp.x) || !isFinite(targetWp.z)) {
+        console.error(`Invalid target waypoint at index ${autopilot.currentWaypointIndex}:`, targetWp);
+        return;
+    }
+    
     const targetDx = targetWp.x - vehicle.x;
     const targetDz = targetWp.z - vehicle.z;
+    
+    if (!isFinite(targetDx) || !isFinite(targetDz)) {
+        console.error('Invalid target position difference in autopilot');
+        return;
+    }
+    
     const targetDistance = Math.sqrt(targetDx * targetDx + targetDz * targetDz);
+    
+    if (!isFinite(targetDistance)) {
+        console.error('Invalid target distance calculation in autopilot');
+        return;
+    }
     
     // Calculate desired angle toward target waypoint
     // In our coordinate system: angle=0 means pointing along negative Z axis
     const desiredAngle = Math.atan2(targetDx, -targetDz);
+    
+    if (!isFinite(desiredAngle)) {
+        console.error('Invalid desired angle calculation in autopilot');
+        return;
+    }
     
     // Calculate angle error (difference between desired and current angle)
     let angleError = desiredAngle - vehicle.angle;
@@ -1043,7 +1202,14 @@ function animate() {
     requestAnimationFrame(animate);
 
     const currentTime = performance.now();
-    const deltaTime = Math.min((currentTime - lastTime) / 1000, 0.1); // Cap at 100ms to prevent large jumps
+    let deltaTime = (currentTime - lastTime) / 1000;
+    
+    // Validate and clamp deltaTime (prevent huge jumps from tab inactivity)
+    if (!isFinite(deltaTime) || deltaTime <= 0 || deltaTime > 0.1) {
+        // If deltaTime is invalid or too large, use a safe default (60 FPS)
+        deltaTime = 0.016;
+    }
+    
     lastTime = currentTime;
 
     // Update autopilot if enabled (before physics)
@@ -1133,6 +1299,12 @@ async function loadMapData() {
 
 // Convert lat/lon to simulator coordinates (meters)
 function latlonToSimulatorCoords(lat, lon, centerLat, centerLon) {
+    // Validate inputs
+    if (!isFinite(lat) || !isFinite(lon) || !isFinite(centerLat) || !isFinite(centerLon)) {
+        console.error('Invalid coordinates in latlonToSimulatorCoords:', { lat, lon, centerLat, centerLon });
+        return { x: 0, z: 0 };
+    }
+    
     // Earth radius in meters
     const R = 6371000;
     
@@ -1145,6 +1317,12 @@ function latlonToSimulatorCoords(lat, lon, centerLat, centerLon) {
     // Calculate offsets in meters (x = east, z = north)
     const x = R * (lonRad - centerLonRad) * Math.abs(Math.cos(centerLatRad));
     const z = R * (latRad - centerLatRad);
+    
+    // Validate outputs
+    if (!isFinite(x) || !isFinite(z)) {
+        console.error('Invalid coordinate transformation result:', { x, z });
+        return { x: 0, z: 0 };
+    }
     
     return { x, z };
 }
@@ -1174,11 +1352,26 @@ function checkAndLoadRoute() {
         
         const [centerLat, centerLon] = mapData.center;
         
-        // Convert waypoints from lat/lon to simulator coordinates
-        const simulatorWaypoints = routeData.waypoints.map(wp => {
-            const coords = latlonToSimulatorCoords(wp.lat, wp.lon, centerLat, centerLon);
-            return { x: coords.x, z: coords.z };
-        });
+        // Convert waypoints from lat/lon to simulator coordinates (with validation)
+        const simulatorWaypoints = routeData.waypoints
+            .map(wp => {
+                if (!wp || !isFinite(wp.lat) || !isFinite(wp.lon)) {
+                    console.warn('Invalid waypoint in route data:', wp);
+                    return null;
+                }
+                const coords = latlonToSimulatorCoords(wp.lat, wp.lon, centerLat, centerLon);
+                if (!isFinite(coords.x) || !isFinite(coords.z)) {
+                    console.warn('Invalid coordinate transformation for waypoint:', wp);
+                    return null;
+                }
+                return { x: coords.x, z: coords.z };
+            })
+            .filter(wp => wp !== null); // Remove invalid waypoints
+        
+        if (simulatorWaypoints.length < 2) {
+            console.error('Insufficient valid waypoints after conversion:', simulatorWaypoints.length);
+            return;
+        }
         
         // Initialize autopilot
         autopilot.waypoints = simulatorWaypoints;
@@ -1213,21 +1406,36 @@ function spawnCarAtWaypoint(waypointIndex) {
     
     const wp = autopilot.waypoints[waypointIndex];
     
+    // Validate waypoint coordinates
+    if (!wp || !isFinite(wp.x) || !isFinite(wp.z)) {
+        console.error(`Invalid waypoint at index ${waypointIndex}:`, wp);
+        return;
+    }
+    
     // Calculate orientation (angle) toward next waypoint
     let angle = 0;
     if (waypointIndex < autopilot.waypoints.length - 1) {
         const nextWp = autopilot.waypoints[waypointIndex + 1];
-        const dx = nextWp.x - wp.x;
-        const dz = nextWp.z - wp.z;
-        // In our coordinate system: angle=0 means pointing along negative Z axis
-        // atan2(dx, -dz) gives us the correct angle
-        angle = Math.atan2(dx, -dz);
+        if (nextWp && isFinite(nextWp.x) && isFinite(nextWp.z)) {
+            const dx = nextWp.x - wp.x;
+            const dz = nextWp.z - wp.z;
+            // In our coordinate system: angle=0 means pointing along negative Z axis
+            // atan2(dx, -dz) gives us the correct angle
+            angle = Math.atan2(dx, -dz);
+            if (!isFinite(angle)) {
+                console.warn('Invalid angle calculation, using 0');
+                angle = 0;
+            }
+        }
     }
     
     // Set vehicle position and orientation
     vehicle.x = wp.x;
     vehicle.z = wp.z;
     vehicle.angle = angle;
+    
+    // Validate after setting
+    validateVehicleState();
     vehicle.velocity = 0;
     vehicle.steering = 0;
     vehicle.steeringActual = 0;
