@@ -452,9 +452,13 @@ def compute_route():
         # Convert path to coordinates
         coordinates = path_to_coordinates(path, nodes_dict)
         
+        # Format waypoints for simulator (list of {lat, lon} objects)
+        waypoints = [{'lat': lat, 'lon': lon} for lat, lon in coordinates]
+        
         return jsonify({
             'path': path,
             'coordinates': coordinates,
+            'waypoints': waypoints,  # Added for simulator autopilot
             'distance': distance,
             'distance_km': distance / 1000.0,
             'num_nodes': len(path),

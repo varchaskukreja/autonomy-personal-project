@@ -39,6 +39,22 @@ const vehicle = {
     tiltTarget: 0 // target tilt for smooth interpolation
 };
 
+// Autopilot state
+const autopilot = {
+    enabled: false,
+    waypoints: [], // Array of {x, z} in simulator coordinates
+    currentWaypointIndex: 0,
+    waypointThreshold: 5.0, // Distance (meters) to consider waypoint reached
+    targetSpeed: 15.0, // Target speed in m/s (~33 mph)
+    steeringGain: 2.0, // How aggressively to steer toward waypoint
+    slowingDistance: 10.0 // Start slowing down when within this distance of waypoint
+};
+
+// Debug visuals for autopilot
+let routeLine = null;
+let waypointMarker = null;
+let waypointMarkerGroup = null;
+
 // Ground plane (will be resized when map loads)
 let ground = null;
 let gridHelper = null;
@@ -288,34 +304,53 @@ const BASE_MAX_SPEED = 25.0; // m/s (~56 mph) - base max speed
 
 // Bicycle model physics
 function updatePhysics(deltaTime) {
-    // Steering input (target steering) - only if admin mode is off
-    if (!adminCamera.enabled && keys.a) {
-        vehicle.steering = Math.max(vehicle.steering - STEERING_RATE * deltaTime, -vehicle.maxSteeringAngle);
-    } else if (!adminCamera.enabled && keys.d) {
-        vehicle.steering = Math.min(vehicle.steering + STEERING_RATE * deltaTime, vehicle.maxSteeringAngle);
-    } else {
-        // Return steering to center smoothly
-        vehicle.steering = THREE.MathUtils.lerp(vehicle.steering, 0, STEERING_RATE * deltaTime * 2);
-    }
+    // Manual controls only if autopilot is disabled
+    if (!autopilot.enabled) {
+        // Steering input (target steering) - only if admin mode is off
+        if (!adminCamera.enabled && keys.a) {
+            vehicle.steering = Math.max(vehicle.steering - STEERING_RATE * deltaTime, -vehicle.maxSteeringAngle);
+        } else if (!adminCamera.enabled && keys.d) {
+            vehicle.steering = Math.min(vehicle.steering + STEERING_RATE * deltaTime, vehicle.maxSteeringAngle);
+        } else {
+            // Return steering to center smoothly
+            vehicle.steering = THREE.MathUtils.lerp(vehicle.steering, 0, STEERING_RATE * deltaTime * 2);
+        }
 
-    // Smooth steering interpolation (wheels turn gradually, not instantly)
-    vehicle.steeringActual = THREE.MathUtils.lerp(
-        vehicle.steeringActual,
-        vehicle.steering,
-        STEERING_SMOOTH * deltaTime
-    );
+        // Smooth steering interpolation (wheels turn gradually, not instantly)
+        vehicle.steeringActual = THREE.MathUtils.lerp(
+            vehicle.steeringActual,
+            vehicle.steering,
+            STEERING_SMOOTH * deltaTime
+        );
 
-    // Throttle/Brake input - only if admin mode is off
-    if (!adminCamera.enabled && keys.w) {
-        vehicle.acceleration = ACCELERATION_RATE;
-    } else if (!adminCamera.enabled && keys.s) {
-        vehicle.acceleration = -BRAKE_RATE;
+        // Throttle/Brake input - only if admin mode is off
+        if (!adminCamera.enabled && keys.w) {
+            vehicle.acceleration = ACCELERATION_RATE;
+        } else if (!adminCamera.enabled && keys.s) {
+            vehicle.acceleration = -BRAKE_RATE;
+        } else {
+            vehicle.acceleration = 0;
+            // Apply friction when no input
+            vehicle.velocity *= FRICTION;
+            if (Math.abs(vehicle.velocity) < 0.05) {
+                vehicle.velocity = 0;
+            }
+        }
     } else {
-        vehicle.acceleration = 0;
-        // Apply friction when no input
-        vehicle.velocity *= FRICTION;
-        if (Math.abs(vehicle.velocity) < 0.05) {
-            vehicle.velocity = 0;
+        // Autopilot mode: steering and throttle are controlled by updateAutopilot
+        // Smooth steering interpolation (wheels turn gradually, not instantly)
+        vehicle.steeringActual = THREE.MathUtils.lerp(
+            vehicle.steeringActual,
+            vehicle.steering,
+            STEERING_SMOOTH * deltaTime
+        );
+        
+        // Apply friction when no acceleration input
+        if (vehicle.acceleration === 0) {
+            vehicle.velocity *= FRICTION;
+            if (Math.abs(vehicle.velocity) < 0.05) {
+                vehicle.velocity = 0;
+            }
         }
     }
 
@@ -854,10 +889,155 @@ function updateUI() {
         `Speed: ${vehicle.velocity.toFixed(1)} m/s (${(vehicle.velocity * 2.237).toFixed(1)} mph)`;
     document.getElementById('position').textContent = 
         `Position: (${vehicle.x.toFixed(1)}, ${vehicle.z.toFixed(1)})`;
+    
+    // Update autopilot status if enabled
+    const waypointInfo = document.getElementById('autopilotStatus');
+    if (autopilot.enabled && waypointInfo) {
+        const progress = autopilot.currentWaypointIndex < autopilot.waypoints.length
+            ? `${autopilot.currentWaypointIndex + 1}/${autopilot.waypoints.length}`
+            : 'Complete';
+        const currentWp = autopilot.currentWaypointIndex < autopilot.waypoints.length
+            ? autopilot.waypoints[autopilot.currentWaypointIndex]
+            : null;
+        const distance = currentWp
+            ? Math.sqrt(Math.pow(currentWp.x - vehicle.x, 2) + Math.pow(currentWp.z - vehicle.z, 2)).toFixed(1)
+            : '0.0';
+        waypointInfo.textContent = `🚗 Autopilot: Waypoint ${progress} | Distance: ${distance}m`;
+        waypointInfo.style.color = '#00ff00';
+        waypointInfo.style.display = 'block';
+    } else if (waypointInfo) {
+        waypointInfo.style.display = 'none';
+    }
 }
 
 // Animation loop
 let lastTime = performance.now();
+
+// Render debug visuals for autopilot route
+function renderRouteDebugVisuals() {
+    if (!autopilot.waypoints || autopilot.waypoints.length < 2) return;
+    
+    // Remove existing visuals if any
+    if (routeLine) scene.remove(routeLine);
+    if (waypointMarkerGroup) scene.remove(waypointMarkerGroup);
+    
+    // Create route line (green polyline)
+    const points = autopilot.waypoints.map(wp => new THREE.Vector3(wp.x, 2, wp.z));
+    const geometry = new THREE.BufferGeometry().setFromPoints(points);
+    const material = new THREE.LineBasicMaterial({ color: 0x00ff00, linewidth: 3 });
+    routeLine = new THREE.Line(geometry, material);
+    scene.add(routeLine);
+    
+    // Create waypoint markers
+    waypointMarkerGroup = new THREE.Group();
+    const markerGeometry = new THREE.ConeGeometry(2, 8, 8);
+    const markerMaterial = new THREE.MeshBasicMaterial({ color: 0xffff00 });
+    
+    autopilot.waypoints.forEach((wp, index) => {
+        const marker = new THREE.Mesh(markerGeometry, markerMaterial);
+        marker.position.set(wp.x, 4, wp.z);
+        marker.rotation.x = Math.PI;
+        waypointMarkerGroup.add(marker);
+    });
+    scene.add(waypointMarkerGroup);
+    
+    console.log("Route debug visuals rendered");
+}
+
+// Update waypoint marker position to highlight current target
+function updateWaypointMarker() {
+    if (!waypointMarkerGroup || !autopilot.enabled) return;
+    
+    // Highlight current waypoint (make it larger and different color)
+    waypointMarkerGroup.children.forEach((marker, index) => {
+        if (index === autopilot.currentWaypointIndex) {
+            marker.material.color.setHex(0xff0000); // Red for current target
+            marker.scale.set(1.5, 1.5, 1.5);
+        } else if (index < autopilot.currentWaypointIndex) {
+            marker.material.color.setHex(0x888888); // Gray for passed waypoints
+            marker.scale.set(1.0, 1.0, 1.0);
+        } else {
+            marker.material.color.setHex(0xffff00); // Yellow for future waypoints
+            marker.scale.set(1.0, 1.0, 1.0);
+        }
+    });
+}
+
+// Autopilot update function (waypoint-following logic)
+function updateAutopilot(deltaTime) {
+    if (!autopilot.enabled || autopilot.currentWaypointIndex >= autopilot.waypoints.length) {
+        // Autopilot complete - stop vehicle
+        vehicle.velocity = THREE.MathUtils.lerp(vehicle.velocity, 0, 0.1);
+        vehicle.acceleration = 0;
+        vehicle.steering = THREE.MathUtils.lerp(vehicle.steering, 0, 0.1);
+        return;
+    }
+    
+    const currentWp = autopilot.waypoints[autopilot.currentWaypointIndex];
+    
+    // Calculate distance to current waypoint
+    const dx = currentWp.x - vehicle.x;
+    const dz = currentWp.z - vehicle.z;
+    const distance = Math.sqrt(dx * dx + dz * dz);
+    
+    // Check if waypoint reached
+    if (distance < autopilot.waypointThreshold) {
+        autopilot.currentWaypointIndex++;
+        updateWaypointMarker();
+        
+        if (autopilot.currentWaypointIndex >= autopilot.waypoints.length) {
+            console.log("✅ Route complete! All waypoints reached.");
+            autopilot.enabled = false;
+            return;
+        }
+        
+        console.log(`Waypoint ${autopilot.currentWaypointIndex - 1} reached, advancing to ${autopilot.currentWaypointIndex}`);
+    }
+    
+    // Get current target waypoint
+    const targetWp = autopilot.waypoints[autopilot.currentWaypointIndex];
+    const targetDx = targetWp.x - vehicle.x;
+    const targetDz = targetWp.z - vehicle.z;
+    const targetDistance = Math.sqrt(targetDx * targetDx + targetDz * targetDz);
+    
+    // Calculate desired angle toward target waypoint
+    // In our coordinate system: angle=0 means pointing along negative Z axis
+    const desiredAngle = Math.atan2(targetDx, -targetDz);
+    
+    // Calculate angle error (difference between desired and current angle)
+    let angleError = desiredAngle - vehicle.angle;
+    
+    // Normalize angle error to [-PI, PI]
+    while (angleError > Math.PI) angleError -= 2 * Math.PI;
+    while (angleError < -Math.PI) angleError += 2 * Math.PI;
+    
+    // Steer toward target waypoint (proportional control)
+    const steeringCommand = Math.max(-1, Math.min(1, angleError * autopilot.steeringGain));
+    vehicle.steering = steeringCommand * vehicle.maxSteeringAngle;
+    
+    // Smooth steering
+    vehicle.steeringActual = THREE.MathUtils.lerp(
+        vehicle.steeringActual,
+        vehicle.steering,
+        STEERING_SMOOTH * deltaTime * 10
+    );
+    
+    // Control throttle/speed
+    // Slow down when approaching waypoint
+    let targetSpeed = autopilot.targetSpeed;
+    if (targetDistance < autopilot.slowingDistance) {
+        // Slow down proportionally as we approach waypoint
+        const speedFactor = targetDistance / autopilot.slowingDistance;
+        targetSpeed = autopilot.targetSpeed * Math.max(0.3, speedFactor);
+    }
+    
+    // Accelerate toward target speed
+    if (vehicle.velocity < targetSpeed) {
+        vehicle.acceleration = ACCELERATION_RATE;
+    } else {
+        vehicle.acceleration = 0;
+    }
+}
 
 function animate() {
     requestAnimationFrame(animate);
@@ -866,6 +1046,11 @@ function animate() {
     const deltaTime = Math.min((currentTime - lastTime) / 1000, 0.1); // Cap at 100ms to prevent large jumps
     lastTime = currentTime;
 
+    // Update autopilot if enabled (before physics)
+    if (autopilot.enabled) {
+        updateAutopilot(deltaTime);
+    }
+    
     // Update physics (car still moves if it was moving when admin mode activated)
     updatePhysics(deltaTime);
 
@@ -877,6 +1062,11 @@ function animate() {
         updateAdminCamera(deltaTime);
     } else {
         updateCamera();
+    }
+
+    // Update waypoint marker visual
+    if (autopilot.enabled) {
+        updateWaypointMarker();
     }
 
     // Update UI
@@ -930,12 +1120,127 @@ async function loadMapData() {
         statusEl.style.color = "#4caf50";
         
         console.log("Map data loaded and rendered");
+        
+        // Check for route in localStorage and start autopilot if available
+        checkAndLoadRoute();
     } catch (error) {
         console.error("Error loading map data:", error);
         statusEl.textContent = "⚠️ Map loading failed - simulator running without map";
         statusEl.style.color = "#ff4444";
         // Continue without map data
     }
+}
+
+// Convert lat/lon to simulator coordinates (meters)
+function latlonToSimulatorCoords(lat, lon, centerLat, centerLon) {
+    // Earth radius in meters
+    const R = 6371000;
+    
+    // Convert to radians
+    const latRad = lat * Math.PI / 180;
+    const lonRad = lon * Math.PI / 180;
+    const centerLatRad = centerLat * Math.PI / 180;
+    const centerLonRad = centerLon * Math.PI / 180;
+    
+    // Calculate offsets in meters (x = east, z = north)
+    const x = R * (lonRad - centerLonRad) * Math.abs(Math.cos(centerLatRad));
+    const z = R * (latRad - centerLatRad);
+    
+    return { x, z };
+}
+
+// Check localStorage for route and initialize autopilot
+function checkAndLoadRoute() {
+    try {
+        const routeDataStr = localStorage.getItem('autopilot_route');
+        if (!routeDataStr) {
+            console.log("No route data found in localStorage");
+            return;
+        }
+        
+        const routeData = JSON.parse(routeDataStr);
+        if (!routeData.waypoints || routeData.waypoints.length < 2) {
+            console.warn("Invalid route data: insufficient waypoints");
+            return;
+        }
+        
+        console.log("Route data found:", routeData);
+        
+        // Get map center from map data
+        if (!mapData || !mapData.center) {
+            console.error("Map data not loaded yet or missing center");
+            return;
+        }
+        
+        const [centerLat, centerLon] = mapData.center;
+        
+        // Convert waypoints from lat/lon to simulator coordinates
+        const simulatorWaypoints = routeData.waypoints.map(wp => {
+            const coords = latlonToSimulatorCoords(wp.lat, wp.lon, centerLat, centerLon);
+            return { x: coords.x, z: coords.z };
+        });
+        
+        // Initialize autopilot
+        autopilot.waypoints = simulatorWaypoints;
+        autopilot.currentWaypointIndex = 0;
+        autopilot.enabled = true;
+        
+        // Spawn car at first waypoint with correct orientation
+        spawnCarAtWaypoint(0);
+        
+        // Render debug visuals
+        renderRouteDebugVisuals();
+        
+        // Update status
+        const statusEl = document.getElementById('mapStatus');
+        statusEl.textContent = `✅ Map loaded | 🚗 Autopilot: ${routeData.waypoints.length} waypoints`;
+        statusEl.style.color = "#4caf50";
+        
+        // Clear localStorage after loading (optional - for testing, you might want to keep it)
+        // localStorage.removeItem('autopilot_route');
+        
+    } catch (error) {
+        console.error("Error loading route:", error);
+    }
+}
+
+// Spawn car at waypoint index with orientation toward next waypoint
+function spawnCarAtWaypoint(waypointIndex) {
+    if (waypointIndex >= autopilot.waypoints.length) {
+        console.error("Waypoint index out of range");
+        return;
+    }
+    
+    const wp = autopilot.waypoints[waypointIndex];
+    
+    // Calculate orientation (angle) toward next waypoint
+    let angle = 0;
+    if (waypointIndex < autopilot.waypoints.length - 1) {
+        const nextWp = autopilot.waypoints[waypointIndex + 1];
+        const dx = nextWp.x - wp.x;
+        const dz = nextWp.z - wp.z;
+        // In our coordinate system: angle=0 means pointing along negative Z axis
+        // atan2(dx, -dz) gives us the correct angle
+        angle = Math.atan2(dx, -dz);
+    }
+    
+    // Set vehicle position and orientation
+    vehicle.x = wp.x;
+    vehicle.z = wp.z;
+    vehicle.angle = angle;
+    vehicle.velocity = 0;
+    vehicle.steering = 0;
+    vehicle.steeringActual = 0;
+    vehicle.angularVelocity = 0;
+    vehicle.tilt = 0;
+    vehicle.tiltTarget = 0;
+    
+    // Update car visual position
+    carGroup.position.set(vehicle.x, 0, vehicle.z);
+    carGroup.rotation.y = -vehicle.angle;
+    carGroup.rotation.z = 0;
+    
+    console.log(`Car spawned at waypoint ${waypointIndex}: (${wp.x.toFixed(2)}, ${wp.z.toFixed(2)}) angle=${(angle * 180 / Math.PI).toFixed(1)}°`);
 }
 /*
 // Render roads as continuous ribbons (properly scaled width, fully connected)
