@@ -3,7 +3,7 @@ import * as THREE from 'three';
 // Scene setup
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0a0015); // Dark purple background
-scene.fog = new THREE.Fog(0x0a0015, 200, 2000); // Adjusted for larger map
+scene.fog = new THREE.Fog(0x3b2a6d, 150, 1200); // Purple fog for atmospheric depth
 
 const camera = new THREE.PerspectiveCamera(
     75,
@@ -55,9 +55,8 @@ let routeLine = null;
 let waypointMarker = null;
 let waypointMarkerGroup = null;
 
-// Sky elements
-let stars = null;
-let nebulaClouds = [];
+// Sky system
+let skyMesh, skyMaterial;
 
 // Ground plane (will be resized when map loads)
 let ground = null;
@@ -84,120 +83,82 @@ function createGround(size = 2000) {
     scene.add(gridHelper);
 }
 
-// Create starfield
-function createStarfield() {
-    const starsGeometry = new THREE.BufferGeometry();
-    const starCount = 3000;
-    const positions = new Float32Array(starCount * 3);
-    const colors = new Float32Array(starCount * 3);
+// =========================
+// 🌌 Procedural Nebula Sky
+// =========================
+function createProceduralSky() {
+    const skyGeometry = new THREE.SphereGeometry(5000, 48, 48);
 
-    for (let i = 0; i < starCount * 3; i += 3) {
-        positions[i] = (Math.random() - 0.5) * 10000;
-        positions[i + 1] = (Math.random() - 0.5) * 10000;
-        positions[i + 2] = (Math.random() - 0.5) * 10000;
+    skyMaterial = new THREE.ShaderMaterial({
+        side: THREE.BackSide,
+        depthWrite: false,
+        uniforms: {
+            uTime: { value: 0 },
+            uTopColor: { value: new THREE.Color(0x6a0dad) },   // deep purple
+            uBottomColor: { value: new THREE.Color(0x1e3cff) } // blue horizon
+        },
+        vertexShader: `
+            varying vec3 vWorldPos;
+            void main() {
+                vec4 worldPos = modelMatrix * vec4(position, 1.0);
+                vWorldPos = worldPos.xyz;
+                gl_Position = projectionMatrix * viewMatrix * worldPos;
+            }
+        `,
+        fragmentShader: `
+            uniform float uTime;
+            uniform vec3 uTopColor;
+            uniform vec3 uBottomColor;
+            varying vec3 vWorldPos;
 
-        // Purple-tinted stars
-        const brightness = Math.random();
-        colors[i] = 0.7 + brightness * 0.3;     // R
-        colors[i + 1] = 0.5 + brightness * 0.3; // G
-        colors[i + 2] = 0.9 + brightness * 0.1; // B
-    }
+            // cheap hash noise
+            float hash(vec3 p) {
+                return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453);
+            }
 
-    starsGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    starsGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            float noise(vec3 p) {
+                vec3 i = floor(p);
+                vec3 f = fract(p);
+                f = f * f * (3.0 - 2.0 * f);
 
-    const starsMaterial = new THREE.PointsMaterial({
-        size: 0.15,
-        vertexColors: true,
-        transparent: true,
-        opacity: 0.8
+                return mix(
+                    mix(mix(hash(i + vec3(0,0,0)), hash(i + vec3(1,0,0)), f.x),
+                        mix(hash(i + vec3(0,1,0)), hash(i + vec3(1,1,0)), f.x), f.y),
+                    mix(mix(hash(i + vec3(0,0,1)), hash(i + vec3(1,0,1)), f.x),
+                        mix(hash(i + vec3(0,1,1)), hash(i + vec3(1,1,1)), f.x), f.y),
+                    f.z
+                );
+            }
+
+            void main() {
+                vec3 dir = normalize(vWorldPos);
+
+                // vertical gradient
+                float h = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
+                vec3 color = mix(uBottomColor, uTopColor, pow(h, 1.2));
+
+                // nebula clouds
+                float n1 = noise(dir * 6.0 + uTime * 0.02);
+                float n2 = noise(dir * 12.0 - uTime * 0.04);
+                float nebula = smoothstep(0.45, 0.7, n1 * 0.6 + n2 * 0.4);
+
+                color += vec3(0.6, 0.3, 0.8) * nebula * 0.6;
+
+                // stars
+                float stars = step(0.995, noise(dir * 120.0));
+                color += vec3(stars);
+
+                gl_FragColor = vec4(color, 1.0);
+            }
+        `
     });
 
-    stars = new THREE.Points(starsGeometry, starsMaterial);
-    scene.add(stars);
+    skyMesh = new THREE.Mesh(skyGeometry, skyMaterial);
+    scene.add(skyMesh);
 }
 
-// Create nebula clouds using planes with gradient textures
-function createNebulaCloud(color1, color2, scale, position) {
-    const canvas = document.createElement('canvas');
-    canvas.width = 512;
-    canvas.height = 512;
-    const ctx = canvas.getContext('2d');
-
-    // Create radial gradient
-    const gradient = ctx.createRadialGradient(256, 256, 0, 256, 256, 256);
-    gradient.addColorStop(0, color1);
-    gradient.addColorStop(0.5, color2);
-    gradient.addColorStop(1, 'rgba(0,0,0,0)');
-
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, 512, 512);
-
-    // Add some noise
-    for (let i = 0; i < 3000; i++) {
-        const x = Math.random() * 512;
-        const y = Math.random() * 512;
-        const size = Math.random() * 3;
-        const alpha = Math.random() * 0.3;
-        ctx.fillStyle = `rgba(255,255,255,${alpha})`;
-        ctx.fillRect(x, y, size, size);
-    }
-
-    const texture = new THREE.CanvasTexture(canvas);
-    const material = new THREE.MeshBasicMaterial({
-        map: texture,
-        transparent: true,
-        side: THREE.DoubleSide,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false
-    });
-
-    const geometry = new THREE.PlaneGeometry(scale, scale);
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.position.set(position.x, position.y, position.z);
-    mesh.rotation.x = Math.random() * Math.PI;
-    mesh.rotation.y = Math.random() * Math.PI;
-    
-    return mesh;
-}
-
-// Create nebula sky system
-function createNebulaSky() {
-    // Create starfield
-    createStarfield();
-
-    // Add multiple nebula clouds with purple/pink/blue colors
-    nebulaClouds = [
-        createNebulaCloud('rgba(138,43,226,0.4)', 'rgba(75,0,130,0.2)', 2500, { x: -1000, y: 500, z: -2000 }),
-        createNebulaCloud('rgba(218,112,214,0.3)', 'rgba(138,43,226,0.15)', 3000, { x: 1500, y: -800, z: -2500 }),
-        createNebulaCloud('rgba(147,112,219,0.35)', 'rgba(106,90,205,0.2)', 2800, { x: -500, y: -1000, z: -1800 }),
-        createNebulaCloud('rgba(186,85,211,0.3)', 'rgba(138,43,226,0.15)', 2200, { x: 800, y: 1200, z: -2200 }),
-        createNebulaCloud('rgba(75,0,130,0.4)', 'rgba(72,61,139,0.2)', 2600, { x: -1500, y: -500, z: -2800 })
-    ];
-
-    nebulaClouds.forEach(cloud => scene.add(cloud));
-
-    // Add some brighter glow spots
-    for (let i = 0; i < 8; i++) {
-        const glowGeometry = new THREE.SphereGeometry(50, 16, 16);
-        const glowMaterial = new THREE.MeshBasicMaterial({
-            color: new THREE.Color().setHSL(0.75 + Math.random() * 0.08, 0.8, 0.6),
-            transparent: true,
-            opacity: 0.15,
-            blending: THREE.AdditiveBlending
-        });
-        const glow = new THREE.Mesh(glowGeometry, glowMaterial);
-        glow.position.set(
-            (Math.random() - 0.5) * 4000,
-            (Math.random() - 0.5) * 4000,
-            -1500 - Math.random() * 1500
-        );
-        scene.add(glow);
-    }
-}
-
-// Initialize nebula sky
-createNebulaSky();
+// Call once
+createProceduralSky();
 
 // Create initial ground
 createGround(2000);
@@ -241,21 +202,16 @@ carGroup.position.set(vehicle.x, 0, vehicle.z);
 scene.add(carGroup);
 
 // Lighting
-const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
-scene.add(ambientLight);
+const sunLight = new THREE.DirectionalLight(0xffd6ff, 1.2);
+sunLight.position.set(-300, 800, -200);
+sunLight.castShadow = true;
+sunLight.shadow.mapSize.set(2048, 2048);
+sunLight.shadow.camera.near = 10;
+sunLight.shadow.camera.far = 2000;
+scene.add(sunLight);
 
-const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-directionalLight.position.set(50, 100, 50);
-directionalLight.castShadow = true;
-directionalLight.shadow.mapSize.width = 2048;
-directionalLight.shadow.mapSize.height = 2048;
-directionalLight.shadow.camera.near = 0.5;
-directionalLight.shadow.camera.far = 500;
-directionalLight.shadow.camera.left = -100;
-directionalLight.shadow.camera.right = 100;
-directionalLight.shadow.camera.top = 100;
-directionalLight.shadow.camera.bottom = -100;
-scene.add(directionalLight);
+// Ambient fill (very important)
+scene.add(new THREE.AmbientLight(0x665588, 0.45));
 
 // Camera position (follow vehicle)
 const cameraOffset = new THREE.Vector3(0, 8, 10); // Behind and above vehicle
@@ -1367,16 +1323,15 @@ function animate() {
         spawnMarker.scale.set(scale, scale, scale);
     }
     
-    // Animate sky elements
-    if (stars) {
-        stars.rotation.y += 0.0002;
-        stars.rotation.x += 0.0001;
+    // Update sky animation
+    if (skyMaterial) {
+        skyMaterial.uniforms.uTime.value = performance.now() * 0.001;
     }
     
-    // Rotate nebula clouds
-    nebulaClouds.forEach((cloud, i) => {
-        cloud.rotation.z += 0.0001 * (i + 1);
-    });
+    // Make sky follow camera position (important for visibility)
+    if (skyMesh) {
+        skyMesh.position.copy(camera.position);
+    }
 
     // Render
     renderer.render(scene, camera);
