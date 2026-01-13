@@ -57,6 +57,9 @@ let waypointMarkerGroup = null;
 
 // Sky system
 let skyMesh, skyMaterial;
+let starfield = null;
+let nebulaClouds = [];
+let glowSpots = [];
 
 // Ground plane (will be resized when map loads)
 let ground = null;
@@ -94,8 +97,8 @@ function createProceduralSky() {
         depthWrite: false,
         uniforms: {
             uTime: { value: 0 },
-            uTopColor: { value: new THREE.Color(0x6a0dad) },   // deep purple
-            uBottomColor: { value: new THREE.Color(0x1e3cff) } // blue horizon
+            uTopColor: { value: new THREE.Color(0x4a0d7a) },   // deeper purple
+            uBottomColor: { value: new THREE.Color(0x2d1b69) } // deep purple-blue horizon
         },
         vertexShader: `
             varying vec3 vWorldPos;
@@ -133,20 +136,26 @@ function createProceduralSky() {
             void main() {
                 vec3 dir = normalize(vWorldPos);
 
-                // vertical gradient
+                // vertical gradient with smoother blending
                 float h = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
-                vec3 color = mix(uBottomColor, uTopColor, pow(h, 1.2));
+                float gradientFactor = pow(h, 0.8); // Smoother transition
+                vec3 color = mix(uBottomColor, uTopColor, gradientFactor);
 
-                // nebula clouds
+                // nebula clouds with better blending
                 float n1 = noise(dir * 6.0 + uTime * 0.02);
                 float n2 = noise(dir * 12.0 - uTime * 0.04);
-                float nebula = smoothstep(0.45, 0.7, n1 * 0.6 + n2 * 0.4);
+                float n3 = noise(dir * 3.0 + uTime * 0.01);
+                float nebula = smoothstep(0.4, 0.75, n1 * 0.5 + n2 * 0.3 + n3 * 0.2);
 
-                color += vec3(0.6, 0.3, 0.8) * nebula * 0.6;
+                // Deeper purple nebula tint
+                vec3 nebulaColor = vec3(0.4, 0.15, 0.6) * nebula * 0.5;
+                color = mix(color, color + nebulaColor, nebula * 0.7);
 
-                // stars
-                float stars = step(0.995, noise(dir * 120.0));
-                color += vec3(stars);
+                // More stars with varying brightness
+                float stars1 = step(0.996, noise(dir * 120.0));
+                float stars2 = step(0.998, noise(dir * 200.0));
+                float stars3 = step(0.994, noise(dir * 80.0));
+                color += vec3(stars1 * 0.8 + stars2 * 1.0 + stars3 * 0.6);
 
                 gl_FragColor = vec4(color, 1.0);
             }
@@ -159,6 +168,140 @@ function createProceduralSky() {
 
 // Call once
 createProceduralSky();
+
+// Create additional starfield for more stars
+function createStarfield() {
+    const starsGeometry = new THREE.BufferGeometry();
+    const starCount = 3000;
+    const positions = new Float32Array(starCount * 3);
+    const colors = new Float32Array(starCount * 3);
+
+    for (let i = 0; i < starCount * 3; i += 3) {
+        positions[i] = (Math.random() - 0.5) * 10000;
+        positions[i + 1] = (Math.random() - 0.5) * 10000;
+        positions[i + 2] = (Math.random() - 0.5) * 10000;
+
+        // Purple-tinted stars with varying brightness
+        const brightness = Math.random();
+        colors[i] = 0.7 + brightness * 0.3;     // R
+        colors[i + 1] = 0.5 + brightness * 0.3; // G
+        colors[i + 2] = 0.9 + brightness * 0.1; // B
+    }
+
+    starsGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    starsGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+    const starsMaterial = new THREE.PointsMaterial({
+        size: 0.2,
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.9,
+        sizeAttenuation: false
+    });
+
+    starfield = new THREE.Points(starsGeometry, starsMaterial);
+    scene.add(starfield);
+}
+
+// Create nebula clouds using planes with gradient textures
+function createNebulaCloud(color1, color2, scale, position) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 512;
+    canvas.height = 512;
+    const ctx = canvas.getContext('2d');
+
+    // Create radial gradient
+    const gradient = ctx.createRadialGradient(256, 256, 0, 256, 256, 256);
+    gradient.addColorStop(0, color1);
+    gradient.addColorStop(0.5, color2);
+    gradient.addColorStop(1, 'rgba(0,0,0,0)');
+
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, 512, 512);
+
+    // Add some noise for texture
+    for (let i = 0; i < 3000; i++) {
+        const x = Math.random() * 512;
+        const y = Math.random() * 512;
+        const size = Math.random() * 3;
+        const alpha = Math.random() * 0.3;
+        ctx.fillStyle = `rgba(255,255,255,${alpha})`;
+        ctx.fillRect(x, y, size, size);
+    }
+
+    const texture = new THREE.CanvasTexture(canvas);
+    const material = new THREE.MeshBasicMaterial({
+        map: texture,
+        transparent: true,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false
+    });
+
+    const geometry = new THREE.PlaneGeometry(scale, scale);
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.position.set(position.x, position.y, position.z);
+    mesh.rotation.x = Math.random() * Math.PI;
+    mesh.rotation.y = Math.random() * Math.PI;
+    
+    return mesh;
+}
+
+// Create enhanced sky elements
+function createEnhancedSkyElements() {
+    // Create starfield
+    createStarfield();
+
+    // Add multiple nebula clouds with purple/pink/blue colors (scaled for larger world)
+    const nebulaPositions = [
+        { x: -1000, y: 500, z: -2000 },
+        { x: 1500, y: -800, z: -2500 },
+        { x: -500, y: -1000, z: -1800 },
+        { x: 800, y: 1200, z: -2200 },
+        { x: -1500, y: -500, z: -2800 }
+    ];
+    
+    nebulaClouds = [
+        createNebulaCloud('rgba(138,43,226,0.4)', 'rgba(75,0,130,0.2)', 2500, nebulaPositions[0]),
+        createNebulaCloud('rgba(218,112,214,0.3)', 'rgba(138,43,226,0.15)', 3000, nebulaPositions[1]),
+        createNebulaCloud('rgba(147,112,219,0.35)', 'rgba(106,90,205,0.2)', 2800, nebulaPositions[2]),
+        createNebulaCloud('rgba(186,85,211,0.3)', 'rgba(138,43,226,0.15)', 2200, nebulaPositions[3]),
+        createNebulaCloud('rgba(75,0,130,0.4)', 'rgba(72,61,139,0.2)', 2600, nebulaPositions[4])
+    ];
+
+    nebulaClouds.forEach((cloud, i) => {
+        cloud.userData.relativePos = new THREE.Vector3(
+            nebulaPositions[i].x,
+            nebulaPositions[i].y,
+            nebulaPositions[i].z
+        );
+        scene.add(cloud);
+    });
+
+    // Add some brighter glow spots for ethereal effect
+    for (let i = 0; i < 8; i++) {
+        const glowGeometry = new THREE.SphereGeometry(50, 16, 16);
+        const glowMaterial = new THREE.MeshBasicMaterial({
+            color: new THREE.Color().setHSL(0.75 + Math.random() * 0.08, 0.8, 0.6),
+            transparent: true,
+            opacity: 0.15,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false
+        });
+        const glow = new THREE.Mesh(glowGeometry, glowMaterial);
+        // Store relative position to camera
+        glow.userData.relativePos = new THREE.Vector3(
+            (Math.random() - 0.5) * 4000,
+            (Math.random() - 0.5) * 4000,
+            -1500 - Math.random() * 1500
+        );
+        scene.add(glow);
+        glowSpots.push(glow);
+    }
+}
+
+// Initialize enhanced sky elements
+createEnhancedSkyElements();
 
 // Create initial ground
 createGround(2000);
@@ -1332,6 +1475,28 @@ function animate() {
     if (skyMesh) {
         skyMesh.position.copy(camera.position);
     }
+    
+    // Make starfield follow camera
+    if (starfield) {
+        starfield.position.copy(camera.position);
+        starfield.rotation.y += 0.0001;
+        starfield.rotation.x += 0.00005;
+    }
+    
+    // Rotate nebula clouds slowly and make them follow camera
+    nebulaClouds.forEach((cloud, i) => {
+        if (cloud.userData.relativePos) {
+            cloud.position.copy(camera.position).add(cloud.userData.relativePos);
+        }
+        cloud.rotation.z += 0.00005 * (i + 1);
+    });
+    
+    // Make glow spots follow camera
+    glowSpots.forEach(glow => {
+        if (glow.userData.relativePos) {
+            glow.position.copy(camera.position).add(glow.userData.relativePos);
+        }
+    });
 
     // Render
     renderer.render(scene, camera);
@@ -1637,17 +1802,25 @@ function renderRoads(roads) {
 // Ultra-optimized: Batch roads by type into single meshes (best for 21k+ roads)
 
 function renderRoads(roads) {
-    // Road type styles
+    // Shared physically based asphalt material for all roads
+    const roadMaterial = new THREE.MeshStandardMaterial({
+        color: new THREE.Color(0x2b2b2b), // dark asphalt gray
+        roughness: 0.85,
+        metalness: 0.0,
+        fog: true
+    });
+    
+    // Road type styles (widths only, color comes from shared material)
     const roadTypeStyles = {
-        'motorway': { color: 0x2a2a2a, width: 12 },
-        'trunk': { color: 0x333333, width: 10 },
-        'primary': { color: 0x444444, width: 8 },
-        'secondary': { color: 0x555555, width: 7 },
-        'tertiary': { color: 0x666666, width: 6 },
-        'residential': { color: 0x777777, width: 5 },
-        'unclassified': { color: 0x888888, width: 5 },
-        'service': { color: 0x999999, width: 4 },
-        'living_street': { color: 0x777777, width: 5 }
+        'motorway': { width: 12 },
+        'trunk': { width: 10 },
+        'primary': { width: 8 },
+        'secondary': { width: 7 },
+        'tertiary': { width: 6 },
+        'residential': { width: 5 },
+        'unclassified': { width: 5 },
+        'service': { width: 4 },
+        'living_street': { width: 5 }
     };
     
     // Group roads by type for batching
@@ -1667,9 +1840,8 @@ function renderRoads(roads) {
     
     // Create one mesh per road type (much fewer draw calls)
     Object.keys(roadsByType).forEach(roadType => {
-        const style = roadTypeStyles[roadType] || { color: 0x666666, width: 5 };
+        const style = roadTypeStyles[roadType] || { width: 5 };
         const roadWidth = style.width;
-        const color = style.color;
         const roadsOfType = roadsByType[roadType];
         
         const vertices = [];
@@ -1758,10 +1930,8 @@ function renderRoads(roads) {
         geometry.setIndex(indices);
         geometry.computeVertexNormals();
         
-        const material = new THREE.MeshLambertMaterial({ 
-            color: color,
-            side: THREE.DoubleSide
-        });
+        // Use shared PBR material for all roads
+        const material = roadMaterial;
         
         const roadMesh = new THREE.Mesh(geometry, material);
         roadMesh.receiveShadow = true;
