@@ -1802,25 +1802,17 @@ function renderRoads(roads) {
 // Ultra-optimized: Batch roads by type into single meshes (best for 21k+ roads)
 
 function renderRoads(roads) {
-    // Shared physically based asphalt material for all roads
-    const roadMaterial = new THREE.MeshStandardMaterial({
-        color: new THREE.Color(0x2b2b2b), // dark asphalt gray
-        roughness: 0.85,
-        metalness: 0.0,
-        fog: true
-    });
-    
-    // Road type styles (widths only, color comes from shared material)
+    // Road type styles
     const roadTypeStyles = {
-        'motorway': { width: 12 },
-        'trunk': { width: 10 },
-        'primary': { width: 8 },
-        'secondary': { width: 7 },
-        'tertiary': { width: 6 },
-        'residential': { width: 5 },
-        'unclassified': { width: 5 },
-        'service': { width: 4 },
-        'living_street': { width: 5 }
+        'motorway': { color: 0x2a2a2a, width: 12 },
+        'trunk': { color: 0x333333, width: 10 },
+        'primary': { color: 0x444444, width: 8 },
+        'secondary': { color: 0x555555, width: 7 },
+        'tertiary': { color: 0x666666, width: 6 },
+        'residential': { color: 0x777777, width: 5 },
+        'unclassified': { color: 0x888888, width: 5 },
+        'service': { color: 0x999999, width: 4 },
+        'living_street': { color: 0x777777, width: 5 }
     };
     
     // Group roads by type for batching
@@ -1840,8 +1832,9 @@ function renderRoads(roads) {
     
     // Create one mesh per road type (much fewer draw calls)
     Object.keys(roadsByType).forEach(roadType => {
-        const style = roadTypeStyles[roadType] || { width: 5 };
+        const style = roadTypeStyles[roadType] || { color: 0x666666, width: 5 };
         const roadWidth = style.width;
+        const color = style.color;
         const roadsOfType = roadsByType[roadType];
         
         const vertices = [];
@@ -1930,8 +1923,10 @@ function renderRoads(roads) {
         geometry.setIndex(indices);
         geometry.computeVertexNormals();
         
-        // Use shared PBR material for all roads
-        const material = roadMaterial;
+        const material = new THREE.MeshLambertMaterial({ 
+            color: color,
+            side: THREE.DoubleSide
+        });
         
         const roadMesh = new THREE.Mesh(geometry, material);
         roadMesh.receiveShadow = true;
