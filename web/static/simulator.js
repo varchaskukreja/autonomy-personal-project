@@ -44,10 +44,30 @@ const autopilot = {
     enabled: false,
     waypoints: [], // Array of {x, z} in simulator coordinates
     currentWaypointIndex: 0,
-    waypointThreshold: 5.0, // Distance (meters) to consider waypoint reached
-    targetSpeed: 15.0, // Target speed in m/s (~33 mph)
-    steeringGain: 2.0, // How aggressively to steer toward waypoint
-    slowingDistance: 10.0 // Start slowing down when within this distance of waypoint
+    waypointThreshold: 12.0, // Distance (meters) to consider waypoint reached (increased to prevent missing)
+    
+    // Lookahead parameters
+    lookaheadGain: 1.0,        // Multiplier for speed-based lookahead (reduced to prevent early turns)
+    minLookahead: 5.0,         // Minimum lookahead distance (m) (reduced)
+    maxLookahead: 15.0,        // Maximum lookahead distance (m) (reduced to prevent cutting corners)
+    
+    // Steering parameters
+    steeringSmoothingFactor: 0.15,  // How fast steering changes (0-1, higher = faster)
+    steeringGain: 1.8,              // Heading error multiplier
+    
+    // Speed parameters
+    targetSpeedStraight: 20.0,  // Max speed on straight roads (m/s)
+    minTurnSpeed: 8.0,          // Min speed for sharp turns (m/s)
+    speedResponseRate: 0.15,    // How quickly speed adjusts (0-1) (slightly faster)
+    
+    // Curvature detection
+    curvatureLookahead: 6,      // How many waypoints ahead to check for turns
+    maxCurvature: 0.25,         // Curvature threshold for max slowdown (rad/m)
+    
+    // Internal state
+    prevSteering: 0,            // For smoothing
+    currentSpeed: 0,            // Smoothed target speed
+    lastWaypointDistance: Infinity // Track distance to waypoint to detect passing
 };
 
 // Debug visuals for autopilot
@@ -537,7 +557,7 @@ window.addEventListener('resize', () => {
 const ACCELERATION_RATE = 15.0; // m/s²
 const BRAKE_RATE = 20.0; // m/s²
 const STEERING_RATE = 4.0; // rad/s - how fast steering changes
-const STEERING_SMOOTH = 12.0; // steering smoothing rate (higher = smoother)
+const STEERING_SMOOTH = 8.0; // Reduced because autopilot handles own smoothing
 const FRICTION = 0.98; // velocity decay when no input (higher = less friction)
 const MIN_SPEED_FOR_TURN = 0.3; // minimum speed to allow turning
 const MAX_ANGULAR_VELOCITY = 1.2; // rad/s - maximum rotation speed (prevents instant 360s)
@@ -1324,44 +1344,237 @@ function updateWaypointMarker() {
     });
 }
 
+// ============================================================================
+// HELPER FUNCTIONS (for autopilot)
+// ============================================================================
+
+/**
+ * Calculate lookahead distance based on current speed
+ */
+function calculateLookaheadDistance() {
+    const speedBasedLookahead = Math.abs(vehicle.velocity) * autopilot.lookaheadGain;
+    return Math.max(
+        autopilot.minLookahead,
+        Math.min(autopilot.maxLookahead, speedBasedLookahead)
+    );
+}
+
+/**
+ * Find lookahead point along the waypoint path
+ * Returns {x, z, waypointIndex} or null if path exhausted
+ */
+function computeLookaheadPoint() {
+    const lookaheadDist = calculateLookaheadDistance();
+    let accumulatedDist = 0;
+    let currentIdx = autopilot.currentWaypointIndex;
+    
+    // Handle path completion
+    if (currentIdx >= autopilot.waypoints.length) {
+        return null;
+    }
+    
+    // Start from current position
+    let prevPoint = { x: vehicle.x, z: vehicle.z };
+    
+    // Limit lookahead to prevent skipping too many waypoints
+    // Don't look more than 2-3 waypoints ahead to prevent cutting corners
+    const maxWaypointsAhead = 3;
+    const maxIdx = Math.min(currentIdx + maxWaypointsAhead, autopilot.waypoints.length - 1);
+    
+    // Walk along waypoints until we exceed lookahead distance
+    while (currentIdx <= maxIdx) {
+        const wp = autopilot.waypoints[currentIdx];
+        
+        const dx = wp.x - prevPoint.x;
+        const dz = wp.z - prevPoint.z;
+        const segmentDist = Math.sqrt(dx * dx + dz * dz);
+        
+        if (accumulatedDist + segmentDist >= lookaheadDist) {
+            // Lookahead point is on this segment
+            const remainingDist = lookaheadDist - accumulatedDist;
+            const ratio = remainingDist / segmentDist;
+            
+            return {
+                x: prevPoint.x + dx * ratio,
+                z: prevPoint.z + dz * ratio,
+                waypointIndex: currentIdx
+            };
+        }
+        
+        accumulatedDist += segmentDist;
+        prevPoint = wp;
+        currentIdx++;
+    }
+    
+    // If we haven't reached lookahead distance but hit max waypoints, use the last valid waypoint
+    if (maxIdx < autopilot.waypoints.length) {
+        const targetWp = autopilot.waypoints[maxIdx];
+        return {
+            x: targetWp.x,
+            z: targetWp.z,
+            waypointIndex: maxIdx
+        };
+    }
+    
+    // If we ran out of waypoints, return the last one
+    if (autopilot.waypoints.length > 0) {
+        const lastWp = autopilot.waypoints[autopilot.waypoints.length - 1];
+        return {
+            x: lastWp.x,
+            z: lastWp.z,
+            waypointIndex: autopilot.waypoints.length - 1
+        };
+    }
+    
+    return null;
+}
+
+/**
+ * Calculate path curvature by analyzing upcoming waypoints
+ * Returns curvature value (higher = sharper turn)
+ */
+function computePathCurvature() {
+    const lookAhead = autopilot.curvatureLookahead;
+    const startIdx = autopilot.currentWaypointIndex;
+    const endIdx = Math.min(startIdx + lookAhead, autopilot.waypoints.length - 1);
+    
+    if (endIdx <= startIdx + 1) {
+        return 0; // Not enough waypoints to detect curve
+    }
+    
+    let totalAngleChange = 0;
+    let totalPathLength = 0;
+    
+    for (let i = startIdx; i < endIdx; i++) {
+        const wp1 = autopilot.waypoints[i];
+        const wp2 = autopilot.waypoints[i + 1];
+        
+        // Calculate segment length
+        const dx = wp2.x - wp1.x;
+        const dz = wp2.z - wp1.z;
+        const segmentLength = Math.sqrt(dx * dx + dz * dz);
+        totalPathLength += segmentLength;
+        
+        // Calculate heading change
+        if (i < endIdx - 1) {
+            const wp3 = autopilot.waypoints[i + 2];
+            
+            const angle1 = Math.atan2(wp2.x - wp1.x, -(wp2.z - wp1.z));
+            const angle2 = Math.atan2(wp3.x - wp2.x, -(wp3.z - wp2.z));
+            
+            let angleDiff = angle2 - angle1;
+            
+            // Normalize to [-PI, PI]
+            while (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
+            while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
+            
+            totalAngleChange += Math.abs(angleDiff);
+        }
+    }
+    
+    // Curvature = total angle change / path length
+    if (totalPathLength < 0.1) return 0;
+    
+    return totalAngleChange / totalPathLength;
+}
+
+/**
+ * Calculate target speed based on upcoming curvature
+ */
+function speedFromCurvature(curvature) {
+    const curvatureRatio = Math.min(curvature / autopilot.maxCurvature, 1.0);
+    
+    // Lerp between max speed (straight) and min turn speed (sharp curve)
+    return autopilot.targetSpeedStraight * (1.0 - curvatureRatio) + 
+           autopilot.minTurnSpeed * curvatureRatio;
+}
+
+/**
+ * Compute pure-pursuit steering based on heading error to lookahead point
+ */
+function computePurePursuitSteering(lookaheadPoint) {
+    if (!lookaheadPoint) return 0;
+    
+    // Vector from car to lookahead point
+    const dx = lookaheadPoint.x - vehicle.x;
+    const dz = lookaheadPoint.z - vehicle.z;
+    
+    // Desired heading (angle to lookahead point)
+    const desiredHeading = Math.atan2(dx, -dz);
+    
+    // Heading error
+    let headingError = desiredHeading - vehicle.angle;
+    
+    // Normalize to [-PI, PI]
+    while (headingError > Math.PI) headingError -= 2 * Math.PI;
+    while (headingError < -Math.PI) headingError += 2 * Math.PI;
+    
+    // Reduce steering gain when close to current waypoint to prevent over-steering
+    let effectiveGain = autopilot.steeringGain;
+    if (autopilot.currentWaypointIndex < autopilot.waypoints.length) {
+        const currentWp = autopilot.waypoints[autopilot.currentWaypointIndex];
+        const distToWp = Math.sqrt(
+            Math.pow(currentWp.x - vehicle.x, 2) + 
+            Math.pow(currentWp.z - vehicle.z, 2)
+        );
+        // Reduce gain when within 20m of waypoint
+        if (distToWp < 20.0) {
+            const proximityFactor = Math.max(0.5, distToWp / 20.0);
+            effectiveGain = autopilot.steeringGain * proximityFactor;
+        }
+    }
+    
+    // Proportional steering control
+    let steeringCommand = headingError * effectiveGain;
+    
+    // Clamp to max steering angle
+    steeringCommand = Math.max(-vehicle.maxSteeringAngle, 
+                              Math.min(vehicle.maxSteeringAngle, steeringCommand));
+    
+    return steeringCommand;
+}
+
+// ============================================================================
+// AUTOPILOT UPDATE FUNCTION
+// ============================================================================
+
 // Autopilot update function (waypoint-following logic)
 function updateAutopilot(deltaTime) {
     if (!autopilot.enabled || autopilot.currentWaypointIndex >= autopilot.waypoints.length) {
-        // Autopilot complete - stop vehicle
+        // Autopilot complete or disabled - coast to stop
         vehicle.velocity = THREE.MathUtils.lerp(vehicle.velocity, 0, 0.1);
         vehicle.acceleration = 0;
         vehicle.steering = THREE.MathUtils.lerp(vehicle.steering, 0, 0.1);
         return;
     }
     
+    // Step 1: Check if current waypoint is reached
     const currentWp = autopilot.waypoints[autopilot.currentWaypointIndex];
     
-    // Validate waypoint coordinates
     if (!currentWp || !isFinite(currentWp.x) || !isFinite(currentWp.z)) {
-        console.error(`Invalid waypoint at index ${autopilot.currentWaypointIndex}:`, currentWp);
+        console.error(`Invalid waypoint at index ${autopilot.currentWaypointIndex}`);
         autopilot.currentWaypointIndex++;
+        autopilot.lastWaypointDistance = Infinity;
         return;
     }
     
-    // Calculate distance to current waypoint (with validation)
     const dx = currentWp.x - vehicle.x;
     const dz = currentWp.z - vehicle.z;
+    const distanceToWaypoint = Math.sqrt(dx * dx + dz * dz);
     
-    if (!isFinite(dx) || !isFinite(dz)) {
-        console.error('Invalid position difference in autopilot calculation');
-        return;
-    }
+    // Check if we're within threshold
+    const withinThreshold = distanceToWaypoint < autopilot.waypointThreshold;
     
-    const distance = Math.sqrt(dx * dx + dz * dz);
+    // Check if we've passed the waypoint (only if we were close and are now moving away)
+    // This helps catch cases where we take a wide turn and miss the waypoint
+    const wasClose = autopilot.lastWaypointDistance < autopilot.waypointThreshold * 2.0;
+    const movingAway = distanceToWaypoint > autopilot.lastWaypointDistance + 2.0; // Must be moving away by at least 2m
+    const passedWaypoint = wasClose && movingAway && isFinite(autopilot.lastWaypointDistance);
     
-    if (!isFinite(distance)) {
-        console.error('Invalid distance calculation in autopilot');
-        return;
-    }
-    
-    // Check if waypoint reached
-    if (distance < autopilot.waypointThreshold) {
+    if (withinThreshold || passedWaypoint) {
+        // Waypoint reached or passed, advance
         autopilot.currentWaypointIndex++;
+        autopilot.lastWaypointDistance = Infinity;
         updateWaypointMarker();
         
         if (autopilot.currentWaypointIndex >= autopilot.waypoints.length) {
@@ -1370,74 +1583,63 @@ function updateAutopilot(deltaTime) {
             return;
         }
         
-        console.log(`Waypoint ${autopilot.currentWaypointIndex - 1} reached, advancing to ${autopilot.currentWaypointIndex}`);
+        console.log(`Waypoint ${autopilot.currentWaypointIndex - 1} ${passedWaypoint ? 'passed' : 'reached'}, advancing to ${autopilot.currentWaypointIndex}`);
+    } else {
+        // Update last distance for next frame
+        autopilot.lastWaypointDistance = distanceToWaypoint;
     }
     
-    // Get current target waypoint
-    const targetWp = autopilot.waypoints[autopilot.currentWaypointIndex];
+    // Step 2: Compute lookahead point
+    const lookaheadPoint = computeLookaheadPoint();
     
-    // Validate target waypoint
-    if (!targetWp || !isFinite(targetWp.x) || !isFinite(targetWp.z)) {
-        console.error(`Invalid target waypoint at index ${autopilot.currentWaypointIndex}:`, targetWp);
+    if (!lookaheadPoint) {
+        // No more path, stop
+        vehicle.acceleration = -BRAKE_RATE;
+        vehicle.steering = 0;
         return;
     }
     
-    const targetDx = targetWp.x - vehicle.x;
-    const targetDz = targetWp.z - vehicle.z;
+    // Step 3: Compute steering using pure-pursuit
+    const rawSteering = computePurePursuitSteering(lookaheadPoint);
     
-    if (!isFinite(targetDx) || !isFinite(targetDz)) {
-        console.error('Invalid target position difference in autopilot');
-        return;
-    }
+    // Smooth steering (damping)
+    vehicle.steering = THREE.MathUtils.lerp(
+        autopilot.prevSteering,
+        rawSteering,
+        autopilot.steeringSmoothingFactor
+    );
+    autopilot.prevSteering = vehicle.steering;
     
-    const targetDistance = Math.sqrt(targetDx * targetDx + targetDz * targetDz);
+    // Step 4: Detect upcoming curvature
+    const curvature = computePathCurvature();
     
-    if (!isFinite(targetDistance)) {
-        console.error('Invalid target distance calculation in autopilot');
-        return;
-    }
+    // Step 5: Calculate target speed based on curvature
+    const targetSpeed = speedFromCurvature(curvature);
     
-    // Calculate desired angle toward target waypoint
-    // In our coordinate system: angle=0 means pointing along negative Z axis
-    const desiredAngle = Math.atan2(targetDx, -targetDz);
-    
-    if (!isFinite(desiredAngle)) {
-        console.error('Invalid desired angle calculation in autopilot');
-        return;
-    }
-    
-    // Calculate angle error (difference between desired and current angle)
-    let angleError = desiredAngle - vehicle.angle;
-    
-    // Normalize angle error to [-PI, PI]
-    while (angleError > Math.PI) angleError -= 2 * Math.PI;
-    while (angleError < -Math.PI) angleError += 2 * Math.PI;
-    
-    // Steer toward target waypoint (proportional control)
-    const steeringCommand = Math.max(-1, Math.min(1, angleError * autopilot.steeringGain));
-    vehicle.steering = steeringCommand * vehicle.maxSteeringAngle;
-    
-    // Smooth steering
-    vehicle.steeringActual = THREE.MathUtils.lerp(
-        vehicle.steeringActual,
-        vehicle.steering,
-        STEERING_SMOOTH * deltaTime * 10
+    // Smooth speed adjustment
+    autopilot.currentSpeed = THREE.MathUtils.lerp(
+        autopilot.currentSpeed,
+        targetSpeed,
+        autopilot.speedResponseRate
     );
     
-    // Control throttle/speed
-    // Slow down when approaching waypoint
-    let targetSpeed = autopilot.targetSpeed;
-    if (targetDistance < autopilot.slowingDistance) {
-        // Slow down proportionally as we approach waypoint
-        const speedFactor = targetDistance / autopilot.slowingDistance;
-        targetSpeed = autopilot.targetSpeed * Math.max(0.3, speedFactor);
+    // Step 6: Apply throttle/brake to reach target speed
+    const speedError = autopilot.currentSpeed - vehicle.velocity;
+    
+    if (speedError > 0.5) {
+        // Need to speed up
+        vehicle.acceleration = ACCELERATION_RATE;
+    } else if (speedError < -0.5) {
+        // Need to slow down
+        vehicle.acceleration = -BRAKE_RATE * 0.6; // Gentler braking
+    } else {
+        // Maintain speed
+        vehicle.acceleration = 0;
     }
     
-    // Accelerate toward target speed
-    if (vehicle.velocity < targetSpeed) {
-        vehicle.acceleration = ACCELERATION_RATE;
-    } else {
-        vehicle.acceleration = 0;
+    // Validation: ensure steering is finite
+    if (!isFinite(vehicle.steering)) {
+        vehicle.steering = 0;
     }
 }
 
@@ -1653,6 +1855,7 @@ function checkAndLoadRoute() {
         // Initialize autopilot
         autopilot.waypoints = simulatorWaypoints;
         autopilot.currentWaypointIndex = 0;
+        autopilot.lastWaypointDistance = Infinity;
         autopilot.enabled = true;
         
         // Spawn car at first waypoint with correct orientation
