@@ -71,17 +71,34 @@ function createGround(size = 2000) {
     if (gridHelper) scene.remove(gridHelper);
     
     const groundGeometry = new THREE.PlaneGeometry(size, size);
-    const groundMaterial = new THREE.MeshLambertMaterial({ 
-        color: 0x90ee90, // Light green grass
+    
+    // PBR material for realistic grass/earth terrain
+    const groundMaterial = new THREE.MeshStandardMaterial({ 
+        color: new THREE.Color(0x5f7354), // Muted grass/earth green
+        roughness: 1.0,                    // Fully matte (natural terrain)
+        metalness: 0.0,                    // Non-metallic
+        fog: true,                         // Fades into fog naturally
         side: THREE.DoubleSide
     });
+    
+    // Add subtle color variation to break flatness
+    groundMaterial.color.offsetHSL(
+        0,                              // No hue shift
+        0,                              // No saturation shift
+        (Math.random() - 0.5) * 0.03    // Slight lightness variation
+    );
+    
+    // Slight darkening so roads visually pop on top
+    groundMaterial.color.multiplyScalar(0.95);
+    
     ground = new THREE.Mesh(groundGeometry, groundMaterial);
     ground.rotation.x = -Math.PI / 2;
     ground.position.y = 0;
-    ground.receiveShadow = true;
+    ground.receiveShadow = true;  // Receives shadows from buildings/vehicles
+    ground.castShadow = false;    // Doesn't cast shadows
     scene.add(ground);
 
-    // Grid helper
+    // Grid helper (optional - can be removed for cleaner look)
     gridHelper = new THREE.GridHelper(size, size / 50, 0x444444, 0x222222);
     scene.add(gridHelper);
 }
@@ -351,10 +368,18 @@ sunLight.castShadow = true;
 sunLight.shadow.mapSize.set(2048, 2048);
 sunLight.shadow.camera.near = 10;
 sunLight.shadow.camera.far = 2000;
+sunLight.shadow.bias = -0.0001; // Reduce shadow acne
+sunLight.shadow.normalBias = 0.02; // Additional bias for smoother shadows
 scene.add(sunLight);
 
-// Ambient fill (very important)
-scene.add(new THREE.AmbientLight(0x665588, 0.45));
+// Ambient fill (increased to reduce harsh shadows on buildings)
+scene.add(new THREE.AmbientLight(0x665588, 0.65));
+
+// Add subtle fill light from opposite side to reduce shadow darkness
+const fillLight = new THREE.DirectionalLight(0xffd6ff, 0.3);
+fillLight.position.set(300, 400, 200); // Opposite side, lower intensity
+fillLight.castShadow = false; // Fill lights don't need shadows
+scene.add(fillLight);
 
 // Camera position (follow vehicle)
 const cameraOffset = new THREE.Vector3(0, 8, 10); // Behind and above vehicle
@@ -1978,14 +2003,43 @@ function renderDebugNodeMarkers(roads) {
 }
 
 // Render buildings as extrusions
+// Render buildings as extrusions with realistic PBR materials
 function renderBuildings(buildings) {
     const buildingGroup = new THREE.Group();
     
-    // Building material
-    const buildingMaterial = new THREE.MeshLambertMaterial({ 
-        color: 0xcccccc,
-        side: THREE.DoubleSide
-    });
+    // Base building materials - neutral, realistic palette
+    const buildingBaseMaterials = [
+        new THREE.MeshStandardMaterial({
+            color: 0xb0b0b0,      // Light gray concrete
+            roughness: 0.7,
+            metalness: 0.0,
+            fog: true
+        }),
+        new THREE.MeshStandardMaterial({
+            color: 0x9aa3a7,      // Cool gray stone
+            roughness: 0.75,
+            metalness: 0.0,
+            fog: true
+        }),
+        new THREE.MeshStandardMaterial({
+            color: 0xc2b8a3,      // Warm beige/tan
+            roughness: 0.65,
+            metalness: 0.0,
+            fog: true
+        }),
+        new THREE.MeshStandardMaterial({
+            color: 0xa89f91,      // Earthy brown-gray
+            roughness: 0.72,
+            metalness: 0.0,
+            fog: true
+        }),
+        new THREE.MeshStandardMaterial({
+            color: 0xd4cfc8,      // Off-white/cream
+            roughness: 0.68,
+            metalness: 0.0,
+            fog: true
+        })
+    ];
     
     let buildingCount = 0;
     buildings.forEach((building, index) => {
@@ -2002,29 +2056,52 @@ function renderBuildings(buildings) {
             centroidZ /= building.coordinates.length;
             
             // Create building shape from coordinates relative to centroid
-            // THREE.Shape uses coordinates relative to its origin, so we offset by centroid
             const shape = new THREE.Shape();
             const firstPoint = building.coordinates[0];
-            shape.moveTo(firstPoint[0] - centroidX, firstPoint[1] - centroidZ); // Offset by centroid
+            shape.moveTo(firstPoint[0] - centroidX, firstPoint[1] - centroidZ);
             
             for (let i = 1; i < building.coordinates.length; i++) {
                 const point = building.coordinates[i];
-                shape.lineTo(point[0] - centroidX, point[1] - centroidZ); // Offset by centroid
+                shape.lineTo(point[0] - centroidX, point[1] - centroidZ);
             }
-            shape.lineTo(firstPoint[0] - centroidX, firstPoint[1] - centroidZ); // Close the shape
+            shape.lineTo(firstPoint[0] - centroidX, firstPoint[1] - centroidZ);
+            
+            // Varied building heights for visual interest
+            const baseHeight = 5;
+            const heightVariation = Math.random() * 15; // 5-20 meters
+            const floors = Math.floor((baseHeight + heightVariation) / 3); // ~3m per floor
+            const buildingHeight = floors * 3; // Snap to floor increments
             
             // Extrude building
             const extrudeSettings = {
-                depth: 5 + Math.random() * 10, // Random height between 5-15 meters
-                bevelEnabled: false
+                depth: buildingHeight,
+                bevelEnabled: true,
+                bevelThickness: 0.1,    // Subtle edge bevel
+                bevelSize: 0.1,
+                bevelSegments: 1
             };
             
             const geometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
-            geometry.rotateX(-Math.PI / 2); // Rotate to lay flat on XZ plane (Shape XY -> World XZ)
+            geometry.rotateX(-Math.PI / 2);
             
-            const mesh = new THREE.Mesh(geometry, buildingMaterial);
-            // Position mesh at building's centroid in world space
-            // After rotateX(-PI/2), Shape's Y becomes world Z, so we use (centroidX, 0, centroidZ)
+            // Pick random base material and clone it for variation
+            const baseMat = buildingBaseMaterials[
+                Math.floor(Math.random() * buildingBaseMaterials.length)
+            ].clone();
+            
+            // Add subtle per-building color variation
+            baseMat.color.offsetHSL(
+                0,                              // No hue shift
+                (Math.random() - 0.5) * 0.08,  // Slight saturation variation
+                (Math.random() - 0.5) * 0.12   // Lightness variation for weathering
+            );
+            
+            // Occasional slightly darker buildings for visual rhythm
+            if (Math.random() < 0.2) {
+                baseMat.color.multiplyScalar(0.85);
+            }
+            
+            const mesh = new THREE.Mesh(geometry, baseMat);
             mesh.position.set(centroidX, 0, centroidZ);
             mesh.castShadow = true;
             mesh.receiveShadow = true;
@@ -2037,7 +2114,7 @@ function renderBuildings(buildings) {
     });
     
     scene.add(buildingGroup);
-    console.log(`Rendered ${buildingCount} buildings`);
+    console.log(`✅ Rendered ${buildingCount} buildings with PBR materials and variation`);
 }
 
 // Start animation loop immediately (for vehicle controls)
