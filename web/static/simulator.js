@@ -1349,7 +1349,8 @@ function updateWaypointMarker() {
 // ============================================================================
 
 /**
- * Calculate lookahead distance based on current speed
+ * Calculate dynamic lookahead distance based on current speed
+ * Closer lookahead at low speeds, farther at high speeds
  */
 function calculateLookaheadDistance() {
     const speedBasedLookahead = Math.abs(vehicle.velocity) * autopilot.lookaheadGain;
@@ -1360,7 +1361,8 @@ function calculateLookaheadDistance() {
 }
 
 /**
- * Find lookahead point along the waypoint path
+ * Find lookahead point along the waypoint path using arc-length method
+ * CRITICAL: Never skips waypoints - respects each one as a hard target
  * Returns {x, z, waypointIndex} or null if path exhausted
  */
 function computeLookaheadPoint() {
@@ -1376,9 +1378,16 @@ function computeLookaheadPoint() {
     // Start from current position
     let prevPoint = { x: vehicle.x, z: vehicle.z };
     
-    // Limit lookahead to prevent skipping too many waypoints
-    // Don't look more than 2-3 waypoints ahead to prevent cutting corners
-    const maxWaypointsAhead = 3;
+    // CRITICAL: Only look ahead to CURRENT waypoint initially
+    // If we're very close to current waypoint, then we can look to the next one
+    const currentWp = autopilot.waypoints[currentIdx];
+    const distToCurrent = Math.sqrt(
+        Math.pow(currentWp.x - vehicle.x, 2) + 
+        Math.pow(currentWp.z - vehicle.z, 2)
+    );
+    
+    // If we're very close to current waypoint (within threshold), allow looking at next
+    const maxWaypointsAhead = distToCurrent < autopilot.waypointThreshold * 1.5 ? 2 : 1;
     const maxIdx = Math.min(currentIdx + maxWaypointsAhead, autopilot.waypoints.length - 1);
     
     // Walk along waypoints until we exceed lookahead distance
@@ -1406,32 +1415,19 @@ function computeLookaheadPoint() {
         currentIdx++;
     }
     
-    // If we haven't reached lookahead distance but hit max waypoints, use the last valid waypoint
-    if (maxIdx < autopilot.waypoints.length) {
-        const targetWp = autopilot.waypoints[maxIdx];
-        return {
-            x: targetWp.x,
-            z: targetWp.z,
-            waypointIndex: maxIdx
-        };
-    }
-    
-    // If we ran out of waypoints, return the last one
-    if (autopilot.waypoints.length > 0) {
-        const lastWp = autopilot.waypoints[autopilot.waypoints.length - 1];
-        return {
-            x: lastWp.x,
-            z: lastWp.z,
-            waypointIndex: autopilot.waypoints.length - 1
-        };
-    }
-    
-    return null;
+    // If we haven't reached lookahead distance, return the furthest valid waypoint
+    const targetWp = autopilot.waypoints[maxIdx];
+    return {
+        x: targetWp.x,
+        z: targetWp.z,
+        waypointIndex: maxIdx
+    };
 }
 
 /**
  * Calculate path curvature by analyzing upcoming waypoints
  * Returns curvature value (higher = sharper turn)
+ * Used for anticipatory speed control
  */
 function computePathCurvature() {
     const lookAhead = autopilot.curvatureLookahead;
@@ -1479,18 +1475,42 @@ function computePathCurvature() {
 }
 
 /**
- * Calculate target speed based on upcoming curvature
+ * Calculate target speed based on upcoming curvature AND distance to waypoint
+ * CRITICAL: Anticipatory deceleration prevents overshooting waypoints
  */
 function speedFromCurvature(curvature) {
+    // Base speed calculation from curvature
     const curvatureRatio = Math.min(curvature / autopilot.maxCurvature, 1.0);
+    const curveBasedSpeed = autopilot.targetSpeedStraight * (1.0 - curvatureRatio) + 
+                           autopilot.minTurnSpeed * curvatureRatio;
     
-    // Lerp between max speed (straight) and min turn speed (sharp curve)
-    return autopilot.targetSpeedStraight * (1.0 - curvatureRatio) + 
-           autopilot.minTurnSpeed * curvatureRatio;
+    // Distance-based deceleration for current waypoint
+    if (autopilot.currentWaypointIndex < autopilot.waypoints.length) {
+        const currentWp = autopilot.waypoints[autopilot.currentWaypointIndex];
+        const distToWp = Math.sqrt(
+            Math.pow(currentWp.x - vehicle.x, 2) + 
+            Math.pow(currentWp.z - vehicle.z, 2)
+        );
+        
+        // Start slowing down when within 30m of waypoint
+        const slowdownDistance = 20.0;
+        if (distToWp < slowdownDistance) {
+            // Quadratic deceleration profile (smooth slowdown)
+            const distRatio = distToWp / slowdownDistance;
+            const distBasedSpeed = autopilot.minTurnSpeed + 
+                                  (curveBasedSpeed - autopilot.minTurnSpeed) * distRatio * distRatio;
+            
+            // Use the minimum of curve-based and distance-based speeds
+            return Math.min(curveBasedSpeed, distBasedSpeed);
+        }
+    }
+    
+    return curveBasedSpeed;
 }
 
 /**
- * Compute pure-pursuit steering based on heading error to lookahead point
+ * Compute pure-pursuit steering command
+ * Uses geometric relationship between vehicle, lookahead point, and path
  */
 function computePurePursuitSteering(lookaheadPoint) {
     if (!lookaheadPoint) return 0;
@@ -1502,14 +1522,15 @@ function computePurePursuitSteering(lookaheadPoint) {
     // Desired heading (angle to lookahead point)
     const desiredHeading = Math.atan2(dx, -dz);
     
-    // Heading error
+    // Heading error (how much we need to turn)
     let headingError = desiredHeading - vehicle.angle;
     
     // Normalize to [-PI, PI]
     while (headingError > Math.PI) headingError -= 2 * Math.PI;
     while (headingError < -Math.PI) headingError += 2 * Math.PI;
     
-    // Reduce steering gain when close to current waypoint to prevent over-steering
+    // Adaptive steering gain based on distance to current waypoint
+    // Reduce aggressiveness when very close to prevent oscillation
     let effectiveGain = autopilot.steeringGain;
     if (autopilot.currentWaypointIndex < autopilot.waypoints.length) {
         const currentWp = autopilot.waypoints[autopilot.currentWaypointIndex];
@@ -1517,9 +1538,10 @@ function computePurePursuitSteering(lookaheadPoint) {
             Math.pow(currentWp.x - vehicle.x, 2) + 
             Math.pow(currentWp.z - vehicle.z, 2)
         );
-        // Reduce gain when within 20m of waypoint
-        if (distToWp < 20.0) {
-            const proximityFactor = Math.max(0.5, distToWp / 20.0);
+        
+        // Gradually reduce gain as we approach waypoint (prevents overshoot)
+        if (distToWp < 15.0) {
+            const proximityFactor = Math.max(0.4, distToWp / 15.0);
             effectiveGain = autopilot.steeringGain * proximityFactor;
         }
     }
