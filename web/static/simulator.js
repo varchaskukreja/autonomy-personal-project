@@ -68,7 +68,7 @@ const autopilot = {
     steeringHistory: [],            // Track recent steering commands [{t, s}]
     oscillationWindowSec: 4.0,      // seconds of history to analyze
     oscillationThreshold: 5,        // sign flips within window => oscillating
-    oscillationMinAvgDelta: 0.06,   // ignore tiny jitter; require some magnitude
+    oscillationMinAvgDelta: 0.02,   // ignore tiny jitter; require some magnitude
     oscillationDeadzone: 0.01,      // rad: smaller deadzone => more sensitive flip counting
     dampingFactor: 1.0,             // Dynamic gain multiplier
     dampingTarget: 0.25,            // Clamp gain down to this when oscillating
