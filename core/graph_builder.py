@@ -273,11 +273,32 @@ def transform_map_data_for_rendering(map_data: Dict, center_lat: float, center_l
     # This ensures buildings and roads share the same coordinate space,
     # matching the matplotlib visualization which plots both in raw lat/lon space
     transformed_buildings = []
+    
+    # Position of the problematic building to remove (in simulator coordinates)
+    PROBLEMATIC_BUILDING_X = -1806.2
+    PROBLEMATIC_BUILDING_Z = -961.8
+    REMOVAL_RADIUS = 50.0  # Remove buildings within 50m of this position
+    
     for building in map_data['buildings']:
         transformed_coords = []
         for lat, lon in building['coordinates']:
             x, z = latlon_to_local_meters(lat, lon, center_lat, center_lon)
             transformed_coords.append((x, z))
+        
+        # Calculate building centroid to check if it's the problematic building
+        if len(transformed_coords) >= 3:
+            centroid_x = sum(coord[0] for coord in transformed_coords) / len(transformed_coords)
+            centroid_z = sum(coord[1] for coord in transformed_coords) / len(transformed_coords)
+            
+            # Check distance from problematic building position
+            distance = ((centroid_x - PROBLEMATIC_BUILDING_X)**2 + 
+                       (centroid_z - PROBLEMATIC_BUILDING_Z)**2)**0.5
+            
+            # Skip this building if it's near the problematic position
+            if distance < REMOVAL_RADIUS:
+                print(f"Removing building at ({centroid_x:.1f}, {centroid_z:.1f}) - distance: {distance:.1f}m")
+                continue
+        
         transformed_buildings.append({
             'coordinates': transformed_coords
         })

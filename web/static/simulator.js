@@ -1477,6 +1477,7 @@ function computePathCurvature() {
 /**
  * Calculate target speed based on upcoming curvature AND distance to waypoint
  * CRITICAL: Anticipatory deceleration prevents overshooting waypoints
+ * Only slows down for turns, not straight segments
  */
 function speedFromCurvature(curvature) {
     // Base speed calculation from curvature
@@ -1484,21 +1485,27 @@ function speedFromCurvature(curvature) {
     const curveBasedSpeed = autopilot.targetSpeedStraight * (1.0 - curvatureRatio) + 
                            autopilot.minTurnSpeed * curvatureRatio;
     
-    // Distance-based deceleration for current waypoint
-    if (autopilot.currentWaypointIndex < autopilot.waypoints.length) {
+    // Distance-based deceleration ONLY if there's an actual turn ahead
+    // Check if there's a significant turn angle at the upcoming waypoint
+    const hasTurnAhead = checkForTurnAtNextWaypoint();
+    
+    // Only apply distance-based deceleration if there's a turn
+    if (hasTurnAhead && autopilot.currentWaypointIndex < autopilot.waypoints.length) {
         const currentWp = autopilot.waypoints[autopilot.currentWaypointIndex];
         const distToWp = Math.sqrt(
             Math.pow(currentWp.x - vehicle.x, 2) + 
             Math.pow(currentWp.z - vehicle.z, 2)
         );
         
-        // Start slowing down when within 30m of waypoint
-        const slowdownDistance = 20.0;
+        // Start slowing down earlier (30m) for sharp turns, earlier braking
+        const slowdownDistance = 30.0;
         if (distToWp < slowdownDistance) {
-            // Quadratic deceleration profile (smooth slowdown)
+            // Cubic deceleration profile (harder initial braking)
+            // distRatio^1.5 gives more aggressive early braking than distRatio^2
             const distRatio = distToWp / slowdownDistance;
+            const decelFactor = Math.pow(distRatio, 1.5); // Cubic curve for harder initial braking
             const distBasedSpeed = autopilot.minTurnSpeed + 
-                                  (curveBasedSpeed - autopilot.minTurnSpeed) * distRatio * distRatio;
+                                  (curveBasedSpeed - autopilot.minTurnSpeed) * decelFactor;
             
             // Use the minimum of curve-based and distance-based speeds
             return Math.min(curveBasedSpeed, distBasedSpeed);
@@ -1506,6 +1513,49 @@ function speedFromCurvature(curvature) {
     }
     
     return curveBasedSpeed;
+}
+
+/**
+ * Check if there's a significant turn angle at the next waypoint
+ * Returns true if there's a turn > 15 degrees ahead
+ */
+function checkForTurnAtNextWaypoint() {
+    // Need at least 2 waypoints ahead to detect a turn
+    if (autopilot.currentWaypointIndex + 2 >= autopilot.waypoints.length) {
+        return false; // No turn if we're at the end
+    }
+    
+    const currentIdx = autopilot.currentWaypointIndex;
+    const wp1 = currentIdx === 0 ? { x: vehicle.x, z: vehicle.z } : autopilot.waypoints[currentIdx - 1];
+    const wp2 = autopilot.waypoints[currentIdx]; // Current waypoint we're heading to
+    const wp3 = autopilot.waypoints[currentIdx + 1]; // Next waypoint after current
+    
+    // Calculate vectors
+    const dx1 = wp2.x - wp1.x;
+    const dz1 = wp2.z - wp1.z;
+    const len1 = Math.sqrt(dx1 * dx1 + dz1 * dz1);
+    
+    const dx2 = wp3.x - wp2.x;
+    const dz2 = wp3.z - wp2.z;
+    const len2 = Math.sqrt(dx2 * dx2 + dz2 * dz2);
+    
+    // Skip if segments are too short
+    if (len1 < 0.1 || len2 < 0.1) return false;
+    
+    // Normalize vectors
+    const v1x = dx1 / len1;
+    const v1z = dz1 / len1;
+    const v2x = dx2 / len2;
+    const v2z = dz2 / len2;
+    
+    // Compute angle between vectors using dot product
+    const dot = v1x * v2x + v1z * v2z;
+    const clampedDot = Math.max(-1, Math.min(1, dot));
+    const angle = Math.acos(clampedDot);
+    
+    // Return true if turn angle > 15 degrees (about 0.26 radians)
+    const MIN_TURN_ANGLE = Math.PI / 12; // 15 degrees
+    return angle > MIN_TURN_ANGLE;
 }
 
 /**
@@ -1645,17 +1695,24 @@ function updateAutopilot(deltaTime) {
         autopilot.speedResponseRate
     );
     
-    // Step 6: Apply throttle/brake to reach target speed
+    // Step 6: Apply proportional throttle/brake to reach target speed
     const speedError = autopilot.currentSpeed - vehicle.velocity;
+    const speedErrorMagnitude = Math.abs(speedError);
     
-    if (speedError > 0.5) {
-        // Need to speed up
-        vehicle.acceleration = ACCELERATION_RATE;
-    } else if (speedError < -0.5) {
-        // Need to slow down
-        vehicle.acceleration = -BRAKE_RATE * 0.6; // Gentler braking
+    // Proportional control with aggressive braking for overshoots
+    if (speedError > 0.2) {
+        // Need to speed up - proportional acceleration
+        const accelerationFactor = Math.min(1.0, speedErrorMagnitude / 8.0);
+        vehicle.acceleration = ACCELERATION_RATE * accelerationFactor;
+    } else if (speedError < -0.2) {
+        // Need to slow down - proportional and aggressive braking
+        // More aggressive braking when overspeeding (harder to slow down)
+        const brakeFactor = Math.min(1.0, speedErrorMagnitude / 10.0);
+        // Use 1.2x brake rate when overspeeding for more aggressive deceleration
+        const brakeMultiplier = speedErrorMagnitude > 3.0 ? 1.2 : 0.8; // Aggressive for large errors
+        vehicle.acceleration = -BRAKE_RATE * brakeMultiplier * (0.6 + 0.4 * brakeFactor);
     } else {
-        // Maintain speed
+        // Maintain speed (tight deadband: ±0.2 m/s)
         vehicle.acceleration = 0;
     }
     
