@@ -64,6 +64,21 @@ const autopilot = {
     curvatureLookahead: 6,      // How many waypoints ahead to check for turns
     maxCurvature: 0.25,         // Curvature threshold for max slowdown (rad/m)
     
+    // Steering oscillation damping
+    steeringHistory: [],            // Track recent steering commands [{t, s}]
+    oscillationWindowSec: 4.0,      // seconds of history to analyze
+    oscillationThreshold: 5,        // sign flips within window => oscillating
+    oscillationMinAvgDelta: 0.06,   // ignore tiny jitter; require some magnitude
+    oscillationDeadzone: 0.01,      // rad: smaller deadzone => more sensitive flip counting
+    dampingFactor: 1.0,             // Dynamic gain multiplier
+    dampingTarget: 0.25,            // Clamp gain down to this when oscillating
+    dampingRecoveryRate: 2.5,       // Per-second recovery back to 1.0 (time-based)
+    dampingSmoothingBoost: 0.22,    // extra steering smoothing when damping is active
+    _lastDampingUpdateSec: null,    // internal timestamp (seconds)
+    oscActive: false,              // debug: true when oscillation detected this frame
+    oscDirectionChanges: 0,         // debug: sign flips in current window
+    oscAvgAbsDelta: 0,              // debug: avg |Δsteer| in current window
+    
     // Internal state
     prevSteering: 0,            // For smoothing
     currentSpeed: 0,            // Smoothed target speed
@@ -1289,6 +1304,11 @@ function updateUI() {
     } else if (waypointInfo) {
         waypointInfo.style.display = 'none';
     }
+
+    // Debug: oscillation damping status
+    if (autopilot.enabled) {
+        updateOscillationDebugUI();
+    }
 }
 
 // Animation loop
@@ -1516,6 +1536,110 @@ function speedFromCurvature(curvature) {
 }
 
 /**
+ * Detect steering oscillations and apply adaptive damping
+ * Returns damping factor (1.0 = normal, <1.0 = damped)
+ */
+function detectAndDampOscillations(currentSteering) {
+    const nowSec = performance.now() / 1000;
+    const lastSec = autopilot._lastDampingUpdateSec;
+    const dt = lastSec === null ? 0.016 : Math.max(0.001, Math.min(0.1, nowSec - lastSec));
+    autopilot._lastDampingUpdateSec = nowSec;
+
+    // Add current steering to history (time window)
+    autopilot.steeringHistory.push({ t: nowSec, s: currentSteering });
+    const cutoff = nowSec - (autopilot.oscillationWindowSec ?? 4.0);
+    while (autopilot.steeringHistory.length > 0 && autopilot.steeringHistory[0].t < cutoff) {
+        autopilot.steeringHistory.shift();
+    }
+    
+    // Need at least 4 samples to detect oscillation
+    if (autopilot.steeringHistory.length < 4) {
+        return autopilot.dampingFactor;
+    }
+    
+    // Count direction changes (sign flips)
+    let directionChanges = 0;
+    let sumAbsDelta = 0;
+    const deadzone = autopilot.oscillationDeadzone ?? 0.02;
+    let lastNonZeroSign = 0;
+    for (let i = 1; i < autopilot.steeringHistory.length; i++) {
+        const prev = autopilot.steeringHistory[i - 1].s;
+        const curr = autopilot.steeringHistory[i].s;
+
+        sumAbsDelta += Math.abs(curr - prev);
+        
+        // More sensitive sign-flip counting:
+        // - Treat values inside deadzone as "no new info" (don’t reset sign to 0)
+        // - Count flips between last known non-zero sign and the next non-zero sign
+        const p = Math.abs(prev) < deadzone ? 0 : Math.sign(prev);
+        const c = Math.abs(curr) < deadzone ? 0 : Math.sign(curr);
+
+        if (p !== 0 && lastNonZeroSign === 0) lastNonZeroSign = p;
+        if (c !== 0) {
+            if (lastNonZeroSign !== 0 && c !== lastNonZeroSign) {
+                directionChanges++;
+            }
+            lastNonZeroSign = c;
+        }
+    }
+
+    const avgAbsDelta = sumAbsDelta / Math.max(1, autopilot.steeringHistory.length - 1);
+    
+    // Detect oscillation: too many direction changes in short time
+    // Also require some magnitude so we don't trigger on tiny numerical jitter
+    const oscillating =
+        directionChanges >= autopilot.oscillationThreshold &&
+        avgAbsDelta >= (autopilot.oscillationMinAvgDelta ?? 0.08);
+
+    // Debug state for UI
+    autopilot.oscActive = oscillating;
+    autopilot.oscDirectionChanges = directionChanges;
+    autopilot.oscAvgAbsDelta = avgAbsDelta;
+
+    if (oscillating) {
+        // Immediate, stronger damping
+        autopilot.dampingFactor = Math.min(autopilot.dampingFactor, autopilot.dampingTarget);
+    } else {
+        // Time-based recovery back to 1.0 (fast, but smooth)
+        autopilot.dampingFactor = Math.min(
+            1.0,
+            autopilot.dampingFactor + autopilot.dampingRecoveryRate * dt
+        );
+    }
+    
+    return autopilot.dampingFactor;
+}
+
+// Debug UI: show when oscillation damping is active
+function updateOscillationDebugUI() {
+    let el = document.getElementById('oscillationStatus');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'oscillationStatus';
+        el.style.cssText = [
+            'position:absolute',
+            'left:10px',
+            'bottom:10px',
+            'background:rgba(0,0,0,0.7)',
+            'color:#ffffff',
+            'padding:8px 12px',
+            'border-radius:4px',
+            'font-family:monospace',
+            'font-size:12px',
+            'z-index:1000',
+            'pointer-events:none'
+        ].join(';');
+        document.body.appendChild(el);
+    }
+
+    const active = !!autopilot.oscActive;
+    const damping = (autopilot.dampingFactor ?? 1.0);
+    el.textContent =
+        `Oscillation: ${active ? 'ON' : 'OFF'} | damping=${damping.toFixed(2)} | flips=${autopilot.oscDirectionChanges ?? 0} | avgΔ=${(autopilot.oscAvgAbsDelta ?? 0).toFixed(2)}`;
+    el.style.color = active ? '#ff6666' : '#aaffaa';
+}
+
+/**
  * Check if there's a significant turn angle at the next waypoint
  * Returns true if there's a turn > 15 degrees ahead
  */
@@ -1596,6 +1720,10 @@ function computePurePursuitSteering(lookaheadPoint) {
         }
     }
     
+    // Detect oscillations and apply damping to steering gain
+    const dampingFactor = detectAndDampOscillations(headingError * effectiveGain);
+    effectiveGain *= dampingFactor;
+    
     // Proportional steering control
     let steeringCommand = headingError * effectiveGain;
     
@@ -1675,10 +1803,14 @@ function updateAutopilot(deltaTime) {
     const rawSteering = computePurePursuitSteering(lookaheadPoint);
     
     // Smooth steering (damping)
+    // When oscillation damping is active, temporarily increase smoothing too
+    const damping = autopilot.dampingFactor ?? 1.0;
+    const smoothingBoost = (1.0 - damping) * (autopilot.dampingSmoothingBoost ?? 0.0);
+    const effectiveSteeringSmoothing = Math.min(0.45, autopilot.steeringSmoothingFactor + smoothingBoost);
     vehicle.steering = THREE.MathUtils.lerp(
         autopilot.prevSteering,
         rawSteering,
-        autopilot.steeringSmoothingFactor
+        effectiveSteeringSmoothing
     );
     autopilot.prevSteering = vehicle.steering;
     
