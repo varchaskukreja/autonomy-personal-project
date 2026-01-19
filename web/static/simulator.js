@@ -46,10 +46,10 @@ const autopilot = {
     currentWaypointIndex: 0,
     waypointThreshold: 12.0, // Distance (meters) to consider waypoint reached (increased to prevent missing)
     
-    // Lookahead parameters
-    lookaheadGain: 1.0,        // Multiplier for speed-based lookahead (reduced to prevent early turns)
-    minLookahead: 5.0,         // Minimum lookahead distance (m) (reduced)
-    maxLookahead: 15.0,        // Maximum lookahead distance (m) (reduced to prevent cutting corners)
+    // Lookahead parameters (Pure Pursuit)
+    lookaheadGain: 0.8,        // Multiplier for speed-based lookahead
+    minLookahead: 4.0,         // Minimum lookahead distance (m)
+    maxLookahead: 18.0,        // Maximum lookahead distance (m)
     
     // Steering parameters
     steeringSmoothingFactor: 0.15,  // How fast steering changes (0-1, higher = faster)
@@ -1381,66 +1381,108 @@ function calculateLookaheadDistance() {
 }
 
 /**
- * Find lookahead point along the waypoint path using arc-length method
- * CRITICAL: Never skips waypoints - respects each one as a hard target
+ * Find lookahead point along the path using Pure Pursuit method
+ * Projects vehicle onto current path segment, then walks forward by lookahead distance
  * Returns {x, z, waypointIndex} or null if path exhausted
  */
 function computeLookaheadPoint() {
     const lookaheadDist = calculateLookaheadDistance();
-    let accumulatedDist = 0;
-    let currentIdx = autopilot.currentWaypointIndex;
+    const currentIdx = autopilot.currentWaypointIndex;
     
     // Handle path completion
     if (currentIdx >= autopilot.waypoints.length) {
         return null;
     }
     
-    // Start from current position
-    let prevPoint = { x: vehicle.x, z: vehicle.z };
+    // Get current path segment: prev_waypoint → current_waypoint
+    let segmentStart, segmentEnd;
     
-    // CRITICAL: Only look ahead to CURRENT waypoint initially
-    // If we're very close to current waypoint, then we can look to the next one
-    const currentWp = autopilot.waypoints[currentIdx];
-    const distToCurrent = Math.sqrt(
-        Math.pow(currentWp.x - vehicle.x, 2) + 
-        Math.pow(currentWp.z - vehicle.z, 2)
-    );
+    if (currentIdx === 0) {
+        // First waypoint: use vehicle position as segment start
+        segmentStart = { x: vehicle.x, z: vehicle.z };
+        segmentEnd = autopilot.waypoints[currentIdx];
+    } else {
+        segmentStart = autopilot.waypoints[currentIdx - 1];
+        segmentEnd = autopilot.waypoints[currentIdx];
+    }
     
-    // If we're very close to current waypoint (within threshold), allow looking at next
-    const maxWaypointsAhead = distToCurrent < autopilot.waypointThreshold * 1.5 ? 2 : 1;
-    const maxIdx = Math.min(currentIdx + maxWaypointsAhead, autopilot.waypoints.length - 1);
+    // Project vehicle position onto current segment
+    const segDx = segmentEnd.x - segmentStart.x;
+    const segDz = segmentEnd.z - segmentStart.z;
+    const segLenSq = segDx * segDx + segDz * segDz;
     
-    // Walk along waypoints until we exceed lookahead distance
-    while (currentIdx <= maxIdx) {
-        const wp = autopilot.waypoints[currentIdx];
+    if (segLenSq < 0.001) {
+        // Degenerate segment, use waypoint directly
+        return {
+            x: segmentEnd.x,
+            z: segmentEnd.z,
+            waypointIndex: currentIdx
+        };
+    }
+    
+    // Project vehicle onto segment
+    const toVehicleX = vehicle.x - segmentStart.x;
+    const toVehicleZ = vehicle.z - segmentStart.z;
+    const t = Math.max(0, Math.min(1, (toVehicleX * segDx + toVehicleZ * segDz) / segLenSq));
+    
+    // Starting point on path (projected position)
+    let pathX = segmentStart.x + t * segDx;
+    let pathZ = segmentStart.z + t * segDz;
+    let remainingDist = lookaheadDist;
+    let searchIdx = currentIdx;
+    let isOnInitialSegment = true;
+    
+    // Walk forward along path segments
+    while (remainingDist > 0.01 && searchIdx < autopilot.waypoints.length) {
+        // Current segment endpoints
+        let segStart, segEnd;
         
-        const dx = wp.x - prevPoint.x;
-        const dz = wp.z - prevPoint.z;
-        const segmentDist = Math.sqrt(dx * dx + dz * dz);
+        if (isOnInitialSegment) {
+            // Still on initial segment (from projected point to current waypoint)
+            segStart = { x: pathX, z: pathZ };
+            segEnd = segmentEnd;
+        } else {
+            // On subsequent segments (from previous waypoint to next waypoint)
+            segStart = autopilot.waypoints[searchIdx - 1];
+            segEnd = autopilot.waypoints[searchIdx];
+        }
         
-        if (accumulatedDist + segmentDist >= lookaheadDist) {
+        // Segment vector and length
+        const dx = segEnd.x - segStart.x;
+        const dz = segEnd.z - segStart.z;
+        const segLen = Math.sqrt(dx * dx + dz * dz);
+        
+        if (segLen < 0.001) {
+            // Skip degenerate segments
+            isOnInitialSegment = false;
+            searchIdx++;
+            continue;
+        }
+        
+        if (remainingDist <= segLen) {
             // Lookahead point is on this segment
-            const remainingDist = lookaheadDist - accumulatedDist;
-            const ratio = remainingDist / segmentDist;
-            
+            const ratio = remainingDist / segLen;
             return {
-                x: prevPoint.x + dx * ratio,
-                z: prevPoint.z + dz * ratio,
-                waypointIndex: currentIdx
+                x: segStart.x + dx * ratio,
+                z: segStart.z + dz * ratio,
+                waypointIndex: searchIdx
             };
         }
         
-        accumulatedDist += segmentDist;
-        prevPoint = wp;
-        currentIdx++;
+        // Consume this segment and continue to next
+        remainingDist -= segLen;
+        pathX = segEnd.x;
+        pathZ = segEnd.z;
+        isOnInitialSegment = false;
+        searchIdx++;
     }
     
-    // If we haven't reached lookahead distance, return the furthest valid waypoint
-    const targetWp = autopilot.waypoints[maxIdx];
+    // Reached end of path, return last waypoint
+    const lastWp = autopilot.waypoints[autopilot.waypoints.length - 1];
     return {
-        x: targetWp.x,
-        z: targetWp.z,
-        waypointIndex: maxIdx
+        x: lastWp.x,
+        z: lastWp.z,
+        waypointIndex: autopilot.waypoints.length - 1
     };
 }
 
@@ -1703,28 +1745,14 @@ function computePurePursuitSteering(lookaheadPoint) {
     while (headingError > Math.PI) headingError -= 2 * Math.PI;
     while (headingError < -Math.PI) headingError += 2 * Math.PI;
     
-    // Adaptive steering gain based on distance to current waypoint
-    // Reduce aggressiveness when very close to prevent oscillation
+    // Apply steering gain (no proximity-based reduction - lookahead handles this)
     let effectiveGain = autopilot.steeringGain;
-    if (autopilot.currentWaypointIndex < autopilot.waypoints.length) {
-        const currentWp = autopilot.waypoints[autopilot.currentWaypointIndex];
-        const distToWp = Math.sqrt(
-            Math.pow(currentWp.x - vehicle.x, 2) + 
-            Math.pow(currentWp.z - vehicle.z, 2)
-        );
-        
-        // Gradually reduce gain as we approach waypoint (prevents overshoot)
-        if (distToWp < 15.0) {
-            const proximityFactor = Math.max(0.4, distToWp / 15.0);
-            effectiveGain = autopilot.steeringGain * proximityFactor;
-        }
-    }
     
     // Detect oscillations and apply damping to steering gain
     const dampingFactor = detectAndDampOscillations(headingError * effectiveGain);
     effectiveGain *= dampingFactor;
     
-    // Proportional steering control
+    // Pure pursuit steering control (single steering objective)
     let steeringCommand = headingError * effectiveGain;
     
     // Clamp to max steering angle
