@@ -22,6 +22,16 @@ document.getElementById('container').appendChild(renderer.domElement);
 let mapData = null;
 let mapCenter = { x: 0, z: 0 };
 
+// Traffic light system
+const TRAFFIC_LIGHT_TIMINGS = {
+    GREEN: 10,  // seconds
+    YELLOW: 2,  // seconds
+    RED: 12     // derived from cycle (GREEN + YELLOW of other direction)
+};
+
+let trafficLights = []; // Array of {intersection, lights: [{mesh, phase, timer, direction}], group}
+const INTERSECTION_THRESHOLD = 3.0; // meters - coordinates within this distance are considered the same point
+
 // Vehicle state (bicycle model)
 const vehicle = {
     x: 0,
@@ -67,7 +77,7 @@ const autopilot = {
     // Steering oscillation damping
     steeringHistory: [],            // Track recent steering commands [{t, s}]
     oscillationWindowSec: 4.0,      // seconds of history to analyze
-    oscillationThreshold: 5,        // sign flips within window => oscillating
+    oscillationThreshold: 3,        // sign flips within window => oscillating
     oscillationMinAvgDelta: 0.02,   // ignore tiny jitter; require some magnitude
     oscillationDeadzone: 0.01,      // rad: smaller deadzone => more sensitive flip counting
     dampingFactor: 1.0,             // Dynamic gain multiplier
@@ -1964,6 +1974,9 @@ function animate() {
         }
     });
 
+    // Update traffic lights
+    updateTrafficLights(deltaTime);
+
     // Render
     renderer.render(scene, camera);
 }
@@ -1989,6 +2002,10 @@ async function loadMapData() {
         statusEl.textContent = "Rendering buildings...";
         // Render buildings
         renderBuildings(mapData.buildings);
+        
+        statusEl.textContent = "Initializing traffic lights...";
+        // Initialize traffic lights at intersections
+        initializeTrafficLights(mapData.roads);
         
         // Debug: optionally show node markers (comment out for production)
         // renderDebugNodeMarkers(mapData.roads);
@@ -2418,6 +2435,332 @@ function renderRoads(roads) {
     if (minX !== Infinity) {
         console.log(`Map bounds: X[${minX.toFixed(1)}, ${maxX.toFixed(1)}], Z[${minZ.toFixed(1)}, ${maxZ.toFixed(1)}]`);
     }
+}
+
+// ============================================================================
+// TRAFFIC LIGHT SYSTEM
+// ============================================================================
+
+/**
+ * Check if a road type is considered "major" (signalized intersections)
+ */
+function isMajorRoad(roadType) {
+    const majorTypes = ['motorway', 'trunk', 'primary', 'secondary'];
+    return majorTypes.includes(roadType);
+}
+
+/**
+ * Find intersections by analyzing road coordinates
+ * Returns array of {position: {x, z}, connectedRoads: [...]}
+ */
+function findIntersections(roads) {
+    const nodeMap = new Map(); // Map coordinate key to array of roads
+    
+    // Build map of coordinates to roads
+    roads.forEach((road, roadIdx) => {
+        road.coordinates.forEach(coord => {
+            const key = `${Math.round(coord[0] / INTERSECTION_THRESHOLD)},${Math.round(coord[1] / INTERSECTION_THRESHOLD)}`;
+            if (!nodeMap.has(key)) {
+                nodeMap.set(key, []);
+            }
+            nodeMap.get(key).push({ road, coord, roadIdx });
+        });
+    });
+    
+    // Find intersections (nodes with ≥3 connections)
+    const intersections = [];
+    nodeMap.forEach((roadsAtNode, key) => {
+        // Count unique roads (not just coordinate occurrences)
+        const uniqueRoads = new Set();
+        roadsAtNode.forEach(item => uniqueRoads.add(item.roadIdx));
+        
+        if (uniqueRoads.size >= 3) {
+            // Check if at least one road is major
+            const hasMajorRoad = roadsAtNode.some(item => isMajorRoad(item.road.type));
+            
+            if (hasMajorRoad) {
+                // Calculate average position (handle multiple coordinates at same intersection)
+                let sumX = 0, sumZ = 0, count = 0;
+                roadsAtNode.forEach(item => {
+                    sumX += item.coord[0];
+                    sumZ += item.coord[1];
+                    count++;
+                });
+                
+                intersections.push({
+                    position: { x: sumX / count, z: sumZ / count },
+                    connectedRoads: Array.from(uniqueRoads).map(idx => roads[idx])
+                });
+            }
+        }
+    });
+    
+    return intersections;
+}
+
+/**
+ * Create a single traffic light mesh (hanging over road, 10x scale)
+ */
+function createTrafficLightMesh() {
+    const SCALE = 5.0; // 5 bigger
+    const group = new THREE.Group();
+    
+    // Vertical pole on the side of the road (cylinder)
+    const poleHeight = 20; // 60m tall
+    const poleRadius = 1; // 3m radius
+    const poleGeometry = new THREE.CylinderGeometry(poleRadius, poleRadius, poleHeight, 16);
+    const poleMaterial = new THREE.MeshStandardMaterial({ 
+        color: 0x333333,
+        roughness: 0.7,
+        metalness: 0.3
+    });
+    const pole = new THREE.Mesh(poleGeometry, poleMaterial);
+    pole.position.y = poleHeight / 2; // Center at half height
+    pole.castShadow = true;
+    pole.receiveShadow = true;
+    group.add(pole);
+    
+    // Horizontal arm extending over the road (cylinder rotated 90 degrees)
+    const armLength = 8.0; // 80m long
+    const armRadius = 1; // 2.5m radius
+    const armGeometry = new THREE.CylinderGeometry(armRadius, armRadius, armLength, 16);
+    const armMaterial = new THREE.MeshStandardMaterial({ 
+        color: 0x333333,
+        roughness: 0.7,
+        metalness: 0.3
+    });
+    const arm = new THREE.Mesh(armGeometry, armMaterial);
+    arm.rotation.z = Math.PI / 2; // Rotate to horizontal (extends along X-axis)
+    arm.position.y = poleHeight - (1.0 * SCALE); // Near top of pole
+    arm.position.x = armLength / 2; // Extend forward (will be rotated with group)
+    arm.userData.isArm = true; // Mark for identification
+    arm.castShadow = true;
+    group.add(arm);
+    
+    // Light box (rectangular box) hanging down from arm
+    const boxWidth = 0.4 * SCALE; // 4m wide
+    const boxHeight = 0.8 * SCALE; // 8m tall
+    const boxDepth = 0.15 * SCALE; // 1.5m deep
+    const boxGeometry = new THREE.BoxGeometry(boxWidth, boxHeight, boxDepth);
+    const boxMaterial = new THREE.MeshStandardMaterial({ 
+        color: 0x1a1a1a,
+        roughness: 0.8,
+        metalness: 0.1
+    });
+    const box = new THREE.Mesh(boxGeometry, boxMaterial);
+    box.position.x = armLength; // At end of arm
+    box.position.y = poleHeight - (1.0 * SCALE) - (boxHeight / 2); // Hanging down from arm
+    box.castShadow = true;
+    group.add(box);
+    
+    // Three light spheres (red, yellow, green) - much bigger
+    const lightRadius = 0.12 * SCALE; // 1.2m radius
+    const lightGeometry = new THREE.SphereGeometry(lightRadius, 16, 16);
+    const lightSpacing = 0.22 * SCALE; // 2.2m spacing
+    
+    // Red light (top)
+    const redMaterial = new THREE.MeshStandardMaterial({ 
+        color: 0xff0000,
+        emissive: 0x000000, // Will be updated based on phase
+        emissiveIntensity: 0.0
+    });
+    const redLight = new THREE.Mesh(lightGeometry, redMaterial);
+    redLight.position.set(armLength, poleHeight - (1.0 * SCALE) - (boxHeight / 2) + lightSpacing, boxDepth / 2 + 0.01 * SCALE);
+    group.add(redLight);
+    
+    // Yellow light (middle)
+    const yellowMaterial = new THREE.MeshStandardMaterial({ 
+        color: 0xffff00,
+        emissive: 0x000000,
+        emissiveIntensity: 0.0
+    });
+    const yellowLight = new THREE.Mesh(lightGeometry, yellowMaterial);
+    yellowLight.position.set(armLength, poleHeight - (1.0 * SCALE) - (boxHeight / 2), boxDepth / 2 + 0.01 * SCALE);
+    group.add(yellowLight);
+    
+    // Green light (bottom)
+    const greenMaterial = new THREE.MeshStandardMaterial({ 
+        color: 0x00ff00,
+        emissive: 0x000000,
+        emissiveIntensity: 0.0
+    });
+    const greenLight = new THREE.Mesh(lightGeometry, greenMaterial);
+    greenLight.position.set(armLength, poleHeight - (1.0 * SCALE) - (boxHeight / 2) - lightSpacing, boxDepth / 2 + 0.01 * SCALE);
+    group.add(greenLight);
+    
+    return {
+        group,
+        redLight,
+        yellowLight,
+        greenLight,
+        redMaterial,
+        yellowMaterial,
+        greenMaterial
+    };
+}
+
+/**
+ * Create traffic lights at an intersection
+ */
+function createTrafficLightsAtIntersection(intersection) {
+    const lights = [];
+    const lightGroup = new THREE.Group();
+    
+    // Find two main directions (orthogonal) for traffic lights
+    // For simplicity, use NS and EW directions
+    const directions = [
+        { name: 'NS', vector: new THREE.Vector3(0, 0, 1), perpendicular: new THREE.Vector3(1, 0, 0) },
+        { name: 'EW', vector: new THREE.Vector3(1, 0, 0), perpendicular: new THREE.Vector3(0, 0, 1) }
+    ];
+    
+    directions.forEach((dir, dirIdx) => {
+        // Position light before intersection along incoming road
+        const stopDistance = 10.0; // meters before intersection
+        const laneOffset = 4.0; // meters to side of road (where pole is)
+        
+        const lightPos = new THREE.Vector3(
+            intersection.position.x,
+            0,
+            intersection.position.z
+        );
+        
+        // Move back along road direction
+        lightPos.sub(dir.vector.clone().multiplyScalar(stopDistance));
+        
+        // Offset pole to side of road (arm will extend over road)
+        lightPos.add(dir.perpendicular.clone().multiplyScalar(laneOffset));
+        
+        // Create traffic light mesh
+        const lightMesh = createTrafficLightMesh();
+        lightMesh.group.position.copy(lightPos);
+        
+        // Rotate to face intersection and align arm over road
+        const angle = Math.atan2(dir.vector.x, dir.vector.z);
+        lightMesh.group.rotation.y = angle;
+        
+        // Rotate arm to extend over road (perpendicular to road direction)
+        // The arm extends along X-axis by default, so we need to rotate it
+        const armRotation = angle + Math.PI / 2; // Perpendicular to road
+        lightMesh.group.children.forEach(child => {
+            if (child.userData && child.userData.isArm) {
+                // Arm rotation is already set in createTrafficLightMesh
+            }
+        });
+        
+        lightGroup.add(lightMesh.group);
+        
+        // Store light state with random phase offset to avoid uniform blinking
+        const phaseOffset = Math.random() * 5.0; // Random offset up to 5 seconds
+        lights.push({
+            mesh: lightMesh,
+            phase: dirIdx === 0 ? 'GREEN' : 'RED', // Alternate starting phases
+            timer: phaseOffset, // Start with random offset
+            direction: dir.name
+        });
+    });
+    
+    scene.add(lightGroup);
+    
+    return {
+        intersection,
+        lights,
+        group: lightGroup
+    };
+}
+
+/**
+ * Update traffic light phases and visual states
+ */
+function updateTrafficLights(deltaTime) {
+    trafficLights.forEach(trafficLight => {
+        trafficLight.lights.forEach(light => {
+            light.timer += deltaTime;
+            
+            // Get phase duration
+            const phaseDuration = TRAFFIC_LIGHT_TIMINGS[light.phase];
+            
+            // Check if phase should change
+            if (light.timer >= phaseDuration) {
+                // Transition to next phase
+                if (light.phase === 'GREEN') {
+                    light.phase = 'YELLOW';
+                } else if (light.phase === 'YELLOW') {
+                    light.phase = 'RED';
+                } else { // RED
+                    light.phase = 'GREEN';
+                }
+                light.timer = 0;
+            }
+            
+            // Update emissive materials based on current phase (10x brighter for 10x size)
+            const emissiveIntensity = 20.0; // Bright glow for large lights
+            
+            // Turn off all lights first
+            light.mesh.redMaterial.emissiveIntensity = 0.0;
+            light.mesh.yellowMaterial.emissiveIntensity = 0.0;
+            light.mesh.greenMaterial.emissiveIntensity = 0.0;
+            
+            // Turn on active light
+            if (light.phase === 'RED') {
+                light.mesh.redMaterial.emissiveIntensity = emissiveIntensity;
+                light.mesh.redMaterial.emissive.setHex(0xff0000);
+            } else if (light.phase === 'YELLOW') {
+                light.mesh.yellowMaterial.emissiveIntensity = emissiveIntensity;
+                light.mesh.yellowMaterial.emissive.setHex(0xffff00);
+            } else { // GREEN
+                light.mesh.greenMaterial.emissiveIntensity = emissiveIntensity;
+                light.mesh.greenMaterial.emissive.setHex(0x00ff00);
+            }
+        });
+        
+        // Ensure only one direction is green at a time
+        const greenLights = trafficLight.lights.filter(l => l.phase === 'GREEN');
+        if (greenLights.length > 1) {
+            // If both are green, set second to red
+            greenLights[1].phase = 'RED';
+            greenLights[1].timer = 0;
+        }
+        
+        // When a light transitions from YELLOW to RED, check if other should go GREEN
+        trafficLight.lights.forEach((light, idx) => {
+            if (light.phase === 'RED' && light.timer < 0.1) {
+                // Just turned red - check if other light should turn green
+                const otherLight = trafficLight.lights[1 - idx];
+                if (otherLight.phase === 'RED') {
+                    // Both red - turn first one green
+                    trafficLight.lights[0].phase = 'GREEN';
+                    trafficLight.lights[0].timer = 0;
+                }
+            }
+        });
+    });
+}
+
+/**
+ * Initialize traffic lights from map data
+ */
+function initializeTrafficLights(roads) {
+    // Clear existing traffic lights
+    trafficLights.forEach(tl => {
+        scene.remove(tl.group);
+        tl.group.traverse(child => {
+            if (child.geometry) child.geometry.dispose();
+            if (child.material) child.material.dispose();
+        });
+    });
+    trafficLights = [];
+    
+    // Find intersections
+    const intersections = findIntersections(roads);
+    console.log(`Found ${intersections.length} signalized intersections`);
+    
+    // Create traffic lights at each intersection
+    intersections.forEach(intersection => {
+        const trafficLight = createTrafficLightsAtIntersection(intersection);
+        trafficLights.push(trafficLight);
+    });
+    
+    console.log(`Created ${trafficLights.length} traffic light systems`);
 }
 
 // Debug function: Render small markers at node positions to verify connectivity
