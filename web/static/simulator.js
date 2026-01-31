@@ -24,13 +24,27 @@ let mapCenter = { x: 0, z: 0 };
 
 // Traffic light system
 const TRAFFIC_LIGHT_TIMINGS = {
-    GREEN: 10,  // seconds
-    YELLOW: 2,  // seconds
-    RED: 12     // derived from cycle (GREEN + YELLOW of other direction)
+    STRAIGHT_GREEN: 10,  // seconds
+    LEFT_GREEN: 5,       // seconds for left-turn phase
+    YELLOW: 2,           // seconds
+    RED: 0               // derived from cycle
 };
 
-let trafficLights = []; // Array of {intersection, lights: [{mesh, phase, timer, direction}], group}
+let trafficLights = []; // Array of {intersection, lights: [{mesh, phase, timer, approach, type}], group, signalState}
 const INTERSECTION_THRESHOLD = 3.0; // meters - coordinates within this distance are considered the same point
+
+// Road type to width mapping (must match renderRoads)
+const ROAD_TYPE_WIDTHS = {
+    'motorway': 12,
+    'trunk': 10,
+    'primary': 8,
+    'secondary': 7,
+    'tertiary': 6,
+    'residential': 5,
+    'unclassified': 5,
+    'service': 4,
+    'living_street': 5
+};
 
 // Vehicle state (bicycle model)
 const vehicle = {
@@ -2003,9 +2017,9 @@ async function loadMapData() {
         // Render buildings
         renderBuildings(mapData.buildings);
         
+        // Traffic lights initialization
         statusEl.textContent = "Initializing traffic lights...";
-        // Initialize traffic lights at intersections
-        initializeTrafficLights(mapData.roads);
+        initializeTrafficLights(mapData.roads, mapData.buildings);
         
         // Debug: optionally show node markers (comment out for production)
         // renderDebugNodeMarkers(mapData.roads);
@@ -2437,8 +2451,9 @@ function renderRoads(roads) {
     }
 }
 
+
 // ============================================================================
-// TRAFFIC LIGHT SYSTEM
+// TRAFFIC LIGHT SYSTEM - Directional Traffic Light System
 // ============================================================================
 
 /**
@@ -2450,20 +2465,68 @@ function isMajorRoad(roadType) {
 }
 
 /**
+ * Get road width from road type
+ */
+function getRoadWidth(roadType) {
+    return ROAD_TYPE_WIDTHS[roadType] || 5;
+}
+
+/**
+ * Calculate average building height within radius of a point
+ */
+function getAverageBuildingHeight(buildings, centerX, centerZ, radius = 50) {
+    if (!buildings || buildings.length === 0) return 8; // Default height
+    
+    let totalHeight = 0;
+    let count = 0;
+    
+    buildings.forEach(building => {
+        if (building.coordinates.length < 3) return;
+        
+        // Calculate building centroid
+        let centroidX = 0, centroidZ = 0;
+        for (const coord of building.coordinates) {
+            centroidX += coord[0];
+            centroidZ += coord[1];
+        }
+        centroidX /= building.coordinates.length;
+        centroidZ /= building.coordinates.length;
+        
+        // Check if within radius
+        const dx = centroidX - centerX;
+        const dz = centroidZ - centerZ;
+        const distance = Math.sqrt(dx * dx + dz * dz);
+        
+        if (distance <= radius) {
+            // Use same height calculation as renderBuildings (deterministic based on index)
+            const baseHeight = 5;
+            const heightVariation = (building.coordinates.length % 15) * 1.0; // Deterministic variation
+            const floors = Math.floor((baseHeight + heightVariation) / 3);
+            const buildingHeight = floors * 3;
+            
+            totalHeight += buildingHeight;
+            count++;
+        }
+    });
+    
+    return count > 0 ? totalHeight / count : 8; // Default if no buildings nearby
+}
+
+/**
  * Find intersections by analyzing road coordinates
- * Returns array of {position: {x, z}, connectedRoads: [...]}
+ * Returns array of intersections with approach analysis
  */
 function findIntersections(roads) {
     const nodeMap = new Map(); // Map coordinate key to array of roads
     
     // Build map of coordinates to roads
     roads.forEach((road, roadIdx) => {
-        road.coordinates.forEach(coord => {
+        road.coordinates.forEach((coord, coordIdx) => {
             const key = `${Math.round(coord[0] / INTERSECTION_THRESHOLD)},${Math.round(coord[1] / INTERSECTION_THRESHOLD)}`;
             if (!nodeMap.has(key)) {
                 nodeMap.set(key, []);
             }
-            nodeMap.get(key).push({ road, coord, roadIdx });
+            nodeMap.get(key).push({ road, coord, roadIdx, coordIdx });
         });
     });
     
@@ -2487,10 +2550,111 @@ function findIntersections(roads) {
                     count++;
                 });
                 
-                intersections.push({
-                    position: { x: sumX / count, z: sumZ / count },
-                    connectedRoads: Array.from(uniqueRoads).map(idx => roads[idx])
+                const intersectionPos = { x: sumX / count, z: sumZ / count };
+                
+                // Analyze approaches for each connected road
+                const approaches = [];
+                const processedRoads = new Set();
+                
+                roadsAtNode.forEach(item => {
+                    if (processedRoads.has(item.roadIdx)) return;
+                    processedRoads.add(item.roadIdx);
+                    
+                    const road = item.road;
+                    const coordIdx = item.coordIdx;
+                    const coord = item.coord;
+                    
+                    // Determine approach direction (from road toward intersection)
+                    let approachDir = null;
+                    
+                    if (coordIdx === 0) {
+                        // Road starts at intersection, approach is from the end
+                        if (road.coordinates.length > 1) {
+                            const endCoord = road.coordinates[road.coordinates.length - 1];
+                            const dx = coord[0] - endCoord[0];
+                            const dz = coord[1] - endCoord[1];
+                            const len = Math.sqrt(dx * dx + dz * dz);
+                            if (len > 0.1) {
+                                approachDir = new THREE.Vector3(dx / len, 0, dz / len);
+                            }
+                        }
+                    } else if (coordIdx === road.coordinates.length - 1) {
+                        // Road ends at intersection, approach is from the start
+                        if (road.coordinates.length > 1) {
+                            const startCoord = road.coordinates[0];
+                            const dx = coord[0] - startCoord[0];
+                            const dz = coord[1] - startCoord[1];
+                            const len = Math.sqrt(dx * dx + dz * dz);
+                            if (len > 0.1) {
+                                approachDir = new THREE.Vector3(dx / len, 0, dz / len);
+                            }
+                        }
+                    } else {
+                        // Road passes through intersection (middle point)
+                        // Use direction from previous point toward intersection
+                        const prevCoord = road.coordinates[coordIdx - 1];
+                        const dx = coord[0] - prevCoord[0];
+                        const dz = coord[1] - prevCoord[1];
+                        const len = Math.sqrt(dx * dx + dz * dz);
+                        if (len > 0.1) {
+                            approachDir = new THREE.Vector3(dx / len, 0, dz / len);
+                        }
+                    }
+                    
+                    if (approachDir) {
+                        // Calculate right-hand perpendicular using cross product
+                        const up = new THREE.Vector3(0, 1, 0);
+                        const rightPerp = new THREE.Vector3();
+                        rightPerp.crossVectors(approachDir, up).normalize();
+                        
+                        // Get road width
+                        const roadWidth = getRoadWidth(road.type);
+                        
+                        // Check for left-turn possibility
+                        // Find other roads at this intersection that could be left-turn targets
+                        let hasLeftTurn = false;
+                        roadsAtNode.forEach(otherItem => {
+                            if (otherItem.roadIdx === item.roadIdx) return;
+                            
+                            const otherRoad = otherItem.road;
+                            const otherCoord = otherItem.coord;
+                            
+                            // Calculate direction from intersection to other road
+                            const dx = otherCoord[0] - coord[0];
+                            const dz = otherCoord[1] - coord[1];
+                            const len = Math.sqrt(dx * dx + dz * dz);
+                            if (len > 0.1) {
+                                const exitDir = new THREE.Vector3(dx / len, 0, dz / len);
+                                
+                                // Calculate angle between approach and exit
+                                const angle = Math.acos(Math.max(-1, Math.min(1, approachDir.dot(exitDir))));
+                                
+                                // Check if it's a left turn (angle > 45° and < 135°, and exit is to the left)
+                                const crossZ = approachDir.x * exitDir.z - approachDir.z * exitDir.x;
+                                if (angle > Math.PI / 4 && angle < 3 * Math.PI / 4 && crossZ > 0) {
+                                    hasLeftTurn = true;
+                                }
+                            }
+                        });
+                        
+                        approaches.push({
+                            road,
+                            roadIdx: item.roadIdx,
+                            approachDirection: approachDir,
+                            rightPerpendicular: rightPerp,
+                            roadWidth,
+                            hasLeftTurn
+                        });
+                    }
                 });
+                
+                if (approaches.length > 0) {
+                    intersections.push({
+                        position: intersectionPos,
+                        connectedRoads: Array.from(uniqueRoads).map(idx => roads[idx]),
+                        approaches
+                    });
+                }
             }
         }
     });
@@ -2499,15 +2663,20 @@ function findIntersections(roads) {
 }
 
 /**
- * Create a single traffic light mesh (hanging over road, 10x scale)
+ * Create a traffic light mesh with proper scaling and optional left-turn arrow
+ * @param {number} poleHeight - Height of the pole (scaled based on buildings)
+ * @param {boolean} hasLeftTurn - Whether to include left-turn arrow signal
+ * @returns {Object} Traffic light mesh components
  */
-function createTrafficLightMesh() {
-    const SCALE = 5.0; // 5 bigger
+function createTrafficLightMesh(poleHeight, hasLeftTurn = false) {
     const group = new THREE.Group();
     
-    // Vertical pole on the side of the road (cylinder)
-    const poleHeight = 20; // 60m tall
-    const poleRadius = 1; // 3m radius
+    // Scale factors based on pole height (proportional scaling)
+    const baseHeight = 8; // Base reference height
+    const scaleFactor = poleHeight / baseHeight;
+    
+    // Pole dimensions (scaled)
+    const poleRadius = 0.15 * scaleFactor; // Proportional to height
     const poleGeometry = new THREE.CylinderGeometry(poleRadius, poleRadius, poleHeight, 16);
     const poleMaterial = new THREE.MeshStandardMaterial({ 
         color: 0x333333,
@@ -2515,14 +2684,14 @@ function createTrafficLightMesh() {
         metalness: 0.3
     });
     const pole = new THREE.Mesh(poleGeometry, poleMaterial);
-    pole.position.y = poleHeight / 2; // Center at half height
+    pole.position.y = poleHeight / 2;
     pole.castShadow = true;
     pole.receiveShadow = true;
     group.add(pole);
     
-    // Horizontal arm extending over the road (cylinder rotated 90 degrees)
-    const armLength = 8.0; // 80m long
-    const armRadius = 1; // 2.5m radius
+    // Horizontal arm extending over the road
+    const armLength = 3.0 * scaleFactor;
+    const armRadius = 0.12 * scaleFactor;
     const armGeometry = new THREE.CylinderGeometry(armRadius, armRadius, armLength, 16);
     const armMaterial = new THREE.MeshStandardMaterial({ 
         color: 0x333333,
@@ -2530,17 +2699,16 @@ function createTrafficLightMesh() {
         metalness: 0.3
     });
     const arm = new THREE.Mesh(armGeometry, armMaterial);
-    arm.rotation.z = Math.PI / 2; // Rotate to horizontal (extends along X-axis)
-    arm.position.y = poleHeight - (1.0 * SCALE); // Near top of pole
-    arm.position.x = armLength / 2; // Extend forward (will be rotated with group)
-    arm.userData.isArm = true; // Mark for identification
+    arm.rotation.z = Math.PI / 2;
+    arm.position.y = poleHeight - 0.5 * scaleFactor;
+    arm.position.x = armLength / 2;
     arm.castShadow = true;
     group.add(arm);
     
-    // Light box (rectangular box) hanging down from arm
-    const boxWidth = 0.4 * SCALE; // 4m wide
-    const boxHeight = 0.8 * SCALE; // 8m tall
-    const boxDepth = 0.15 * SCALE; // 1.5m deep
+    // Signal box dimensions (scaled)
+    const boxWidth = 3*0.5 * scaleFactor;
+    const boxHeight = 3*1.2 * scaleFactor;
+    const boxDepth = 3*0.2 * scaleFactor;
     const boxGeometry = new THREE.BoxGeometry(boxWidth, boxHeight, boxDepth);
     const boxMaterial = new THREE.MeshStandardMaterial({ 
         color: 0x1a1a1a,
@@ -2548,75 +2716,151 @@ function createTrafficLightMesh() {
         metalness: 0.1
     });
     const box = new THREE.Mesh(boxGeometry, boxMaterial);
-    box.position.x = armLength; // At end of arm
-    box.position.y = poleHeight - (1.0 * SCALE) - (boxHeight / 2); // Hanging down from arm
+    box.position.x = armLength;
+    box.position.y = poleHeight - 0.5 * scaleFactor - (boxHeight / 2);
     box.castShadow = true;
     group.add(box);
     
-    // Three light spheres (red, yellow, green) - much bigger
-    const lightRadius = 0.12 * SCALE; // 1.2m radius
+    // Light dimensions (scaled)
+    const lightRadius = 3*0.15 * scaleFactor;
     const lightGeometry = new THREE.SphereGeometry(lightRadius, 16, 16);
-    const lightSpacing = 0.22 * SCALE; // 2.2m spacing
+    const lightSpacing = 3*0.35 * scaleFactor;
     
-    // Red light (top)
+    // Straight signal lights (R/Y/G) - vertical stack
     const redMaterial = new THREE.MeshStandardMaterial({ 
         color: 0xff0000,
-        emissive: 0x000000, // Will be updated based on phase
+        emissive: 0x000000,
         emissiveIntensity: 0.0
     });
     const redLight = new THREE.Mesh(lightGeometry, redMaterial);
-    redLight.position.set(armLength, poleHeight - (1.0 * SCALE) - (boxHeight / 2) + lightSpacing, boxDepth / 2 + 0.01 * SCALE);
+    redLight.position.set(armLength, poleHeight - 0.5 * scaleFactor - (boxHeight / 2) + lightSpacing, boxDepth / 2 + 0.01);
     group.add(redLight);
     
-    // Yellow light (middle)
     const yellowMaterial = new THREE.MeshStandardMaterial({ 
         color: 0xffff00,
         emissive: 0x000000,
         emissiveIntensity: 0.0
     });
     const yellowLight = new THREE.Mesh(lightGeometry, yellowMaterial);
-    yellowLight.position.set(armLength, poleHeight - (1.0 * SCALE) - (boxHeight / 2), boxDepth / 2 + 0.01 * SCALE);
+    yellowLight.position.set(armLength, poleHeight - 0.5 * scaleFactor - (boxHeight / 2), boxDepth / 2 + 0.01);
     group.add(yellowLight);
     
-    // Green light (bottom)
     const greenMaterial = new THREE.MeshStandardMaterial({ 
         color: 0x00ff00,
         emissive: 0x000000,
         emissiveIntensity: 0.0
     });
     const greenLight = new THREE.Mesh(lightGeometry, greenMaterial);
-    greenLight.position.set(armLength, poleHeight - (1.0 * SCALE) - (boxHeight / 2) - lightSpacing, boxDepth / 2 + 0.01 * SCALE);
+    greenLight.position.set(armLength, poleHeight - 0.5 * scaleFactor - (boxHeight / 2) - lightSpacing, boxDepth / 2 + 0.01);
     group.add(greenLight);
+    
+    // Left-turn arrow signal (if needed) - positioned to the left of straight signals
+    let leftRedMaterial = null;
+    let leftGreenMaterial = null;
+    let leftRedLight = null;
+    let leftGreenLight = null;
+    
+    if (hasLeftTurn) {
+        // Left-turn box (smaller, offset to the left)
+        const leftBoxWidth = 0.4 * scaleFactor;
+        const leftBoxHeight = 0.8 * scaleFactor;
+        const leftBoxDepth = 0.2 * scaleFactor;
+        const leftBoxGeometry = new THREE.BoxGeometry(leftBoxWidth, leftBoxHeight, leftBoxDepth);
+        const leftBox = new THREE.Mesh(leftBoxGeometry, boxMaterial);
+        leftBox.position.x = armLength - 0.3 * scaleFactor; // Offset left
+        leftBox.position.y = poleHeight - 0.5 * scaleFactor - (leftBoxHeight / 2);
+        leftBox.castShadow = true;
+        group.add(leftBox);
+        
+        // Left-turn arrow lights (red and green only, no yellow)
+        const arrowLightRadius = 0.12 * scaleFactor;
+        const arrowLightGeometry = new THREE.SphereGeometry(arrowLightRadius, 16, 16);
+        const arrowSpacing = 0.25 * scaleFactor;
+        
+        leftRedMaterial = new THREE.MeshStandardMaterial({ 
+            color: 0xff0000,
+            emissive: 0x000000,
+            emissiveIntensity: 0.0
+        });
+        leftRedLight = new THREE.Mesh(arrowLightGeometry, leftRedMaterial);
+        leftRedLight.position.set(armLength - 0.3 * scaleFactor, poleHeight - 0.5 * scaleFactor - (leftBoxHeight / 2) + arrowSpacing, leftBoxDepth / 2 + 0.01);
+        group.add(leftRedLight);
+        
+        leftGreenMaterial = new THREE.MeshStandardMaterial({ 
+            color: 0x00ff00,
+            emissive: 0x000000,
+            emissiveIntensity: 0.0
+        });
+        leftGreenLight = new THREE.Mesh(arrowLightGeometry, leftGreenMaterial);
+        leftGreenLight.position.set(armLength - 0.3 * scaleFactor, poleHeight - 0.5 * scaleFactor - (leftBoxHeight / 2) - arrowSpacing, leftBoxDepth / 2 + 0.01);
+        group.add(leftGreenLight);
+        
+        // Create arrow shape indicator (simple triangle for visual clarity)
+        const arrowShape = new THREE.Shape();
+        arrowShape.moveTo(0, 0);
+        arrowShape.lineTo(-0.1 * scaleFactor, -0.15 * scaleFactor);
+        arrowShape.lineTo(0.1 * scaleFactor, -0.15 * scaleFactor);
+        arrowShape.lineTo(0, 0);
+        const arrowGeometry = new THREE.ShapeGeometry(arrowShape);
+        const arrowMaterial = new THREE.MeshBasicMaterial({ 
+            color: 0xffffff,
+            transparent: true,
+            opacity: 0.3
+        });
+        const arrowMesh = new THREE.Mesh(arrowGeometry, arrowMaterial);
+        arrowMesh.position.set(armLength - 0.3 * scaleFactor, poleHeight - 0.5 * scaleFactor - (leftBoxHeight / 2) - arrowSpacing, leftBoxDepth / 2 + 0.02);
+        arrowMesh.rotation.z = Math.PI / 2; // Rotate to point left
+        group.add(arrowMesh);
+    }
     
     return {
         group,
         redLight,
         yellowLight,
         greenLight,
+        leftRedLight,
+        leftGreenLight,
         redMaterial,
         yellowMaterial,
-        greenMaterial
+        greenMaterial,
+        leftRedMaterial,
+        leftGreenMaterial
     };
 }
 
+
 /**
- * Create traffic lights at an intersection
+ * Create traffic lights at an intersection for all approaches
+ * @param {Object} intersection - Intersection with approaches analyzed
+ * @param {number} poleHeight - Height of traffic light poles (scaled from buildings)
  */
-function createTrafficLightsAtIntersection(intersection) {
+function createTrafficLightsAtIntersection(intersection, poleHeight) {
     const lights = [];
     const lightGroup = new THREE.Group();
     
-    // Find two main directions (orthogonal) for traffic lights
-    // For simplicity, use NS and EW directions
-    const directions = [
-        { name: 'NS', vector: new THREE.Vector3(0, 0, 1), perpendicular: new THREE.Vector3(1, 0, 0) },
-        { name: 'EW', vector: new THREE.Vector3(1, 0, 0), perpendicular: new THREE.Vector3(0, 0, 1) }
-    ];
+    // Group approaches by primary direction (NS vs EW) for signal phasing
+    const nsApproaches = [];
+    const ewApproaches = [];
     
-    directions.forEach((dir, dirIdx) => {
-        // Position light before intersection along incoming road
-        const stopDistance = 10.0; // meters before intersection
-        const laneOffset = 4.0; // meters to side of road (where pole is)
+    intersection.approaches.forEach(approach => {
+        const approachDir = approach.approachDirection;
+        // Classify as NS (primarily Z-axis) or EW (primarily X-axis)
+        if (Math.abs(approachDir.z) > Math.abs(approachDir.x)) {
+            nsApproaches.push(approach);
+        } else {
+            ewApproaches.push(approach);
+        }
+    });
+    
+    // Create traffic light for each approach
+    intersection.approaches.forEach(approach => {
+        const approachDir = approach.approachDirection;
+        const rightPerp = approach.rightPerpendicular;
+        const roadWidth = approach.roadWidth;
+        const hasLeftTurn = approach.hasLeftTurn;
+        
+        // Position calculation: intersectionPos - approachDir * stopDistance + rightPerp * roadWidth/2
+        const stopDistance = 8.0; // 6-10 meters before intersection
         
         const lightPos = new THREE.Vector3(
             intersection.position.x,
@@ -2624,112 +2868,206 @@ function createTrafficLightsAtIntersection(intersection) {
             intersection.position.z
         );
         
-        // Move back along road direction
-        lightPos.sub(dir.vector.clone().multiplyScalar(stopDistance));
+        // Move back along approach direction (away from intersection)
+        lightPos.sub(approachDir.clone().multiplyScalar(stopDistance));
         
-        // Offset pole to side of road (arm will extend over road)
-        lightPos.add(dir.perpendicular.clone().multiplyScalar(laneOffset));
+        // Offset to right-hand side of road
+        lightPos.add(rightPerp.clone().multiplyScalar(roadWidth / 2 + 0.5)); // Slightly outside road edge
         
-        // Create traffic light mesh
-        const lightMesh = createTrafficLightMesh();
+        // Create traffic light mesh with proper height and left-turn support
+        const lightMesh = createTrafficLightMesh(poleHeight, hasLeftTurn);
         lightMesh.group.position.copy(lightPos);
         
-        // Rotate to face intersection and align arm over road
-        const angle = Math.atan2(dir.vector.x, dir.vector.z);
+        // Rotate to face incoming traffic
+        // Rotation: atan2(approachDir.x, approachDir.z) + π to face toward intersection
+        const angle = Math.atan2(approachDir.x, approachDir.z) + Math.PI;
         lightMesh.group.rotation.y = angle;
-        
-        // Rotate arm to extend over road (perpendicular to road direction)
-        // The arm extends along X-axis by default, so we need to rotate it
-        const armRotation = angle + Math.PI / 2; // Perpendicular to road
-        lightMesh.group.children.forEach(child => {
-            if (child.userData && child.userData.isArm) {
-                // Arm rotation is already set in createTrafficLightMesh
-            }
-        });
         
         lightGroup.add(lightMesh.group);
         
-        // Store light state with random phase offset to avoid uniform blinking
-        const phaseOffset = Math.random() * 5.0; // Random offset up to 5 seconds
+        // Determine which signal group this approach belongs to
+        const isNS = Math.abs(approachDir.z) > Math.abs(approachDir.x);
+        
+        // Store light state
         lights.push({
             mesh: lightMesh,
-            phase: dirIdx === 0 ? 'GREEN' : 'RED', // Alternate starting phases
-            timer: phaseOffset, // Start with random offset
-            direction: dir.name
+            approach: approach,
+            isNS: isNS,
+            type: 'straight', // Will be updated during phasing
+            phase: 'RED', // Start red, will be controlled by signal state
+            timer: 0
         });
+        
+        // If has left turn, also create a left-turn light entry
+        if (hasLeftTurn) {
+            lights.push({
+                mesh: lightMesh, // Same mesh, different signal
+                approach: approach,
+                isNS: isNS,
+                type: 'left',
+                phase: 'RED',
+                timer: 0
+            });
+        }
     });
     
     scene.add(lightGroup);
     
+    // Initialize signal state machine
+    // States: 'NS_STRAIGHT', 'NS_LEFT', 'YELLOW_NS', 'EW_STRAIGHT', 'EW_LEFT', 'YELLOW_EW'
+    const signalState = {
+        currentPhase: 'NS_STRAIGHT',
+        timer: 0,
+        lastGreenDirection: 'NS' // Track which direction was green for yellow phase
+    };
+    
     return {
         intersection,
         lights,
-        group: lightGroup
+        group: lightGroup,
+        signalState,
+        nsApproaches,
+        ewApproaches
     };
 }
 
 /**
- * Update traffic light phases and visual states
+ * Update traffic light phases and visual states using intersection state machine
  */
 function updateTrafficLights(deltaTime) {
     trafficLights.forEach(trafficLight => {
-        trafficLight.lights.forEach(light => {
-            light.timer += deltaTime;
-            
-            // Get phase duration
-            const phaseDuration = TRAFFIC_LIGHT_TIMINGS[light.phase];
-            
-            // Check if phase should change
-            if (light.timer >= phaseDuration) {
-                // Transition to next phase
-                if (light.phase === 'GREEN') {
-                    light.phase = 'YELLOW';
-                } else if (light.phase === 'YELLOW') {
-                    light.phase = 'RED';
-                } else { // RED
-                    light.phase = 'GREEN';
-                }
-                light.timer = 0;
-            }
-            
-            // Update emissive materials based on current phase (10x brighter for 10x size)
-            const emissiveIntensity = 20.0; // Bright glow for large lights
-            
-            // Turn off all lights first
-            light.mesh.redMaterial.emissiveIntensity = 0.0;
-            light.mesh.yellowMaterial.emissiveIntensity = 0.0;
-            light.mesh.greenMaterial.emissiveIntensity = 0.0;
-            
-            // Turn on active light
-            if (light.phase === 'RED') {
-                light.mesh.redMaterial.emissiveIntensity = emissiveIntensity;
-                light.mesh.redMaterial.emissive.setHex(0xff0000);
-            } else if (light.phase === 'YELLOW') {
-                light.mesh.yellowMaterial.emissiveIntensity = emissiveIntensity;
-                light.mesh.yellowMaterial.emissive.setHex(0xffff00);
-            } else { // GREEN
-                light.mesh.greenMaterial.emissiveIntensity = emissiveIntensity;
-                light.mesh.greenMaterial.emissive.setHex(0x00ff00);
-            }
-        });
+        const signalState = trafficLight.signalState;
+        signalState.timer += deltaTime;
         
-        // Ensure only one direction is green at a time
-        const greenLights = trafficLight.lights.filter(l => l.phase === 'GREEN');
-        if (greenLights.length > 1) {
-            // If both are green, set second to red
-            greenLights[1].phase = 'RED';
-            greenLights[1].timer = 0;
+        // State machine transitions
+        let phaseDuration = 0;
+        let nextPhase = null;
+        
+        switch (signalState.currentPhase) {
+            case 'NS_STRAIGHT':
+                phaseDuration = TRAFFIC_LIGHT_TIMINGS.STRAIGHT_GREEN;
+                if (signalState.timer >= phaseDuration) {
+                    // Check if NS has left turns, otherwise skip to yellow
+                    if (trafficLight.nsApproaches.some(a => a.hasLeftTurn)) {
+                        nextPhase = 'NS_LEFT';
+                    } else {
+                        signalState.lastGreenDirection = 'NS';
+                        nextPhase = 'YELLOW_NS';
+                    }
+                }
+                break;
+            case 'NS_LEFT':
+                phaseDuration = TRAFFIC_LIGHT_TIMINGS.LEFT_GREEN;
+                if (signalState.timer >= phaseDuration) {
+                    signalState.lastGreenDirection = 'NS';
+                    nextPhase = 'YELLOW_NS';
+                }
+                break;
+            case 'YELLOW_NS':
+                phaseDuration = TRAFFIC_LIGHT_TIMINGS.YELLOW;
+                if (signalState.timer >= phaseDuration) {
+                    // Transition to EW
+                    nextPhase = 'EW_STRAIGHT';
+                }
+                break;
+            case 'EW_STRAIGHT':
+                phaseDuration = TRAFFIC_LIGHT_TIMINGS.STRAIGHT_GREEN;
+                if (signalState.timer >= phaseDuration) {
+                    if (trafficLight.ewApproaches.some(a => a.hasLeftTurn)) {
+                        nextPhase = 'EW_LEFT';
+                    } else {
+                        signalState.lastGreenDirection = 'EW';
+                        nextPhase = 'YELLOW_EW';
+                    }
+                }
+                break;
+            case 'EW_LEFT':
+                phaseDuration = TRAFFIC_LIGHT_TIMINGS.LEFT_GREEN;
+                if (signalState.timer >= phaseDuration) {
+                    signalState.lastGreenDirection = 'EW';
+                    nextPhase = 'YELLOW_EW';
+                }
+                break;
+            case 'YELLOW_EW':
+                phaseDuration = TRAFFIC_LIGHT_TIMINGS.YELLOW;
+                if (signalState.timer >= phaseDuration) {
+                    // Cycle back to NS
+                    nextPhase = 'NS_STRAIGHT';
+                }
+                break;
         }
         
-        // When a light transitions from YELLOW to RED, check if other should go GREEN
-        trafficLight.lights.forEach((light, idx) => {
-            if (light.phase === 'RED' && light.timer < 0.1) {
-                // Just turned red - check if other light should turn green
-                const otherLight = trafficLight.lights[1 - idx];
-                if (otherLight.phase === 'RED') {
-                    // Both red - turn first one green
-                    trafficLight.lights[0].phase = 'GREEN';
-                    trafficLight.lights[0].timer = 0;
+        // Handle transition
+        if (nextPhase) {
+            signalState.currentPhase = nextPhase;
+            signalState.timer = 0;
+        }
+        
+        // Update each light based on signal state
+        const emissiveIntensity = 15.0; // Bright glow
+        
+        trafficLight.lights.forEach(light => {
+            const mesh = light.mesh;
+            const isNS = light.isNS;
+            const isLeft = light.type === 'left';
+            
+            // Determine if this light should be active based on signal state
+            let shouldBeGreen = false;
+            let shouldBeYellow = false;
+            
+            if (signalState.currentPhase === 'YELLOW_NS' && isNS) {
+                // Yellow for NS direction
+                shouldBeYellow = true;
+            } else if (signalState.currentPhase === 'YELLOW_EW' && !isNS) {
+                // Yellow for EW direction
+                shouldBeYellow = true;
+            } else if (isNS) {
+                // NS direction
+                if (signalState.currentPhase === 'NS_STRAIGHT' && !isLeft) {
+                    shouldBeGreen = true;
+                } else if (signalState.currentPhase === 'NS_LEFT' && isLeft) {
+                    shouldBeGreen = true;
+                }
+            } else {
+                // EW direction
+                if (signalState.currentPhase === 'EW_STRAIGHT' && !isLeft) {
+                    shouldBeGreen = true;
+                } else if (signalState.currentPhase === 'EW_LEFT' && isLeft) {
+                    shouldBeGreen = true;
+                }
+            }
+            
+            // Update straight signal lights
+            mesh.redMaterial.emissiveIntensity = (!shouldBeGreen && !shouldBeYellow) ? emissiveIntensity : 0.0;
+            mesh.yellowMaterial.emissiveIntensity = shouldBeYellow ? emissiveIntensity : 0.0;
+            mesh.greenMaterial.emissiveIntensity = shouldBeGreen ? emissiveIntensity : 0.0;
+            
+            if (mesh.redMaterial.emissiveIntensity > 0) {
+                mesh.redMaterial.emissive.setHex(0xff0000);
+            }
+            if (mesh.yellowMaterial.emissiveIntensity > 0) {
+                mesh.yellowMaterial.emissive.setHex(0xffff00);
+            }
+            if (mesh.greenMaterial.emissiveIntensity > 0) {
+                mesh.greenMaterial.emissive.setHex(0x00ff00);
+            }
+            
+            // Update left-turn arrow lights (if present)
+            if (mesh.leftRedMaterial && mesh.leftGreenMaterial) {
+                if (isLeft) {
+                    mesh.leftRedMaterial.emissiveIntensity = (!shouldBeGreen) ? emissiveIntensity : 0.0;
+                    mesh.leftGreenMaterial.emissiveIntensity = shouldBeGreen ? emissiveIntensity : 0.0;
+                    
+                    if (mesh.leftRedMaterial.emissiveIntensity > 0) {
+                        mesh.leftRedMaterial.emissive.setHex(0xff0000);
+                    }
+                    if (mesh.leftGreenMaterial.emissiveIntensity > 0) {
+                        mesh.leftGreenMaterial.emissive.setHex(0x00ff00);
+                    }
+                } else {
+                    // Left-turn lights off for straight signals
+                    mesh.leftRedMaterial.emissiveIntensity = 0.0;
+                    mesh.leftGreenMaterial.emissiveIntensity = 0.0;
                 }
             }
         });
@@ -2738,8 +3076,10 @@ function updateTrafficLights(deltaTime) {
 
 /**
  * Initialize traffic lights from map data
+ * @param {Array} roads - Road segments
+ * @param {Array} buildings - Building polygons for height scaling
  */
-function initializeTrafficLights(roads) {
+function initializeTrafficLights(roads, buildings) {
     // Clear existing traffic lights
     trafficLights.forEach(tl => {
         scene.remove(tl.group);
@@ -2750,17 +3090,28 @@ function initializeTrafficLights(roads) {
     });
     trafficLights = [];
     
-    // Find intersections
+    // Find intersections with approach analysis
     const intersections = findIntersections(roads);
     console.log(`Found ${intersections.length} signalized intersections`);
     
     // Create traffic lights at each intersection
     intersections.forEach(intersection => {
-        const trafficLight = createTrafficLightsAtIntersection(intersection);
+        // Calculate pole height based on nearby buildings
+        const avgBuildingHeight = getAverageBuildingHeight(
+            buildings,
+            intersection.position.x,
+            intersection.position.z,
+            50 // 50m radius
+        );
+        
+        // Clamp pole height: avgBuildingHeight * 0.25, between 6 and 12 meters
+        const poleHeight = Math.max(6, Math.min(12, avgBuildingHeight * 0.25));
+        
+        const trafficLight = createTrafficLightsAtIntersection(intersection, poleHeight);
         trafficLights.push(trafficLight);
     });
     
-    console.log(`Created ${trafficLights.length} traffic light systems`);
+    console.log(`Created ${trafficLights.length} traffic light systems with ${trafficLights.reduce((sum, tl) => sum + tl.lights.length, 0)} total lights`);
 }
 
 // Debug function: Render small markers at node positions to verify connectivity
