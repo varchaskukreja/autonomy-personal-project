@@ -106,13 +106,28 @@ const autopilot = {
     // Internal state
     prevSteering: 0,            // For smoothing
     currentSpeed: 0,            // Smoothed target speed
-    lastWaypointDistance: Infinity // Track distance to waypoint to detect passing
+    lastWaypointDistance: Infinity, // Track distance to waypoint to detect passing
+
+    // Traffic light compliance (Phase 1)
+    drivingState: 'NORMAL',     // NORMAL | APPROACHING_LIGHT | STOPPING | STOPPED | PROCEEDING
+    activeLight: null,         // { stopPoint, signal, distance, approachDir, intersectionPos } or null
+    yellowDecision: null,      // null | 'STOP' | 'GO' (locked once set for current yellow)
+    minStoppingDistance: 25.0,  // m - below this at yellow => commit to GO
+    brakingDistance: 40.0,     // m - start gradual decel when red and within this
+    stopOffset: 3.0,           // m - stop point = intersection - approachDir * stopOffset
+    forwardSearchRadius: 80.0,  // m - only consider lights within this ahead
+    alignmentThreshold: 0.7     // cos(~45°) - approach dir must align with vehicle heading
 };
 
 // Debug visuals for autopilot
 let routeLine = null;
 let waypointMarker = null;
 let waypointMarkerGroup = null;
+
+// Traffic light compliance debug visuals
+let stopPointMarker = null;
+let activeLightHighlight = null;
+let trafficLightDebugGroup = null;
 
 // Sky system
 let skyMesh, skyMaterial;
@@ -1325,8 +1340,28 @@ function updateUI() {
         waypointInfo.textContent = `🚗 Autopilot: Waypoint ${progress} | Distance: ${distance}m`;
         waypointInfo.style.color = '#00ff00';
         waypointInfo.style.display = 'block';
+
+        // Traffic light compliance status
+        const trafficLightStatusEl = document.getElementById('trafficLightStatus');
+        if (trafficLightStatusEl) {
+            if (autopilot.activeLight) {
+                const state = autopilot.drivingState;
+                const signal = autopilot.activeLight.signal;
+                const dist = autopilot.activeLight.distance.toFixed(1);
+                const yellowText = autopilot.yellowDecision ? ` | Yellow: ${autopilot.yellowDecision}` : '';
+                trafficLightStatusEl.textContent = `🚦 ${state} | Signal: ${signal} | To stop: ${dist}m${yellowText}`;
+                trafficLightStatusEl.style.display = 'block';
+                trafficLightStatusEl.style.color = signal === 'GREEN' ? '#4caf50' : signal === 'YELLOW' ? '#ffc107' : '#f44336';
+            } else {
+                trafficLightStatusEl.textContent = '🚦 No active light';
+                trafficLightStatusEl.style.display = 'block';
+                trafficLightStatusEl.style.color = '#888';
+            }
+        }
     } else if (waypointInfo) {
         waypointInfo.style.display = 'none';
+        const trafficLightStatusEl = document.getElementById('trafficLightStatus');
+        if (trafficLightStatusEl) trafficLightStatusEl.style.display = 'none';
     }
 
     // Debug: oscillation damping status
@@ -1787,6 +1822,254 @@ function computePurePursuitSteering(lookaheadPoint) {
 }
 
 // ============================================================================
+// TRAFFIC LIGHT COMPLIANCE (for autopilot)
+// ============================================================================
+
+/**
+ * Get current signal for an approach (straight movement) from intersection phase
+ */
+function getCurrentSignalForApproach(trafficLight, isNS) {
+    const phase = trafficLight.signalState.currentPhase;
+    if (phase === 'YELLOW_NS') return isNS ? 'YELLOW' : 'RED';
+    if (phase === 'YELLOW_EW') return isNS ? 'RED' : 'YELLOW';
+    if (phase === 'NS_STRAIGHT' || phase === 'NS_LEFT') return isNS ? 'GREEN' : 'RED';
+    if (phase === 'EW_STRAIGHT' || phase === 'EW_LEFT') return isNS ? 'RED' : 'GREEN';
+    return 'RED';
+}
+
+/**
+ * Build list of traffic light control points (one per approach, straight only)
+ */
+function getTrafficLightControlPoints() {
+    const points = [];
+    trafficLights.forEach(tl => {
+        const intersectionPos = new THREE.Vector3(tl.intersection.position.x, 0, tl.intersection.position.z);
+        // One entry per approach: use only 'straight' lights to avoid duplicates
+        tl.lights.forEach(light => {
+            if (light.type !== 'straight') return;
+            const approachDir = light.approach.approachDirection.clone();
+            const signal = getCurrentSignalForApproach(tl, light.isNS);
+            const stopOffset = autopilot.stopOffset;
+            const stopPoint = intersectionPos.clone().sub(approachDir.clone().multiplyScalar(stopOffset));
+            const poleWorld = new THREE.Vector3();
+            light.mesh.group.getWorldPosition(poleWorld);
+            points.push({
+                intersectionPos: intersectionPos.clone(),
+                approachDir,
+                stopPoint,
+                signal,
+                trafficLight: tl,
+                approach: light.approach,
+                poleWorldPosition: poleWorld.clone()
+            });
+        });
+    });
+    return points;
+}
+
+/**
+ * Get the active traffic light for the vehicle (closest valid light ahead)
+ */
+function getActiveTrafficLight(vehiclePos, vehicleHeading) {
+    const points = getTrafficLightControlPoints();
+    if (points.length === 0) return null;
+
+    const vx = Math.sin(vehicleHeading);
+    const vz = Math.cos(vehicleHeading);
+    const forward = new THREE.Vector3(vx, 0, vz);
+    const radius = autopilot.forwardSearchRadius;
+    const alignMin = autopilot.alignmentThreshold;
+
+    let closest = null;
+    let closestDist = Infinity;
+
+    points.forEach(p => {
+        const toStop = new THREE.Vector3(
+            p.stopPoint.x - vehiclePos.x,
+            0,
+            p.stopPoint.z - vehiclePos.z
+        );
+        const dist = toStop.length();
+        if (dist > radius) return;
+        toStop.normalize();
+        const ahead = toStop.dot(forward) > 0;
+        if (!ahead) return;
+        const align = Math.abs(p.approachDir.dot(forward));
+        if (align < alignMin) return;
+        if (dist < closestDist) {
+            closestDist = dist;
+            closest = {
+                stopPoint: p.stopPoint,
+                signal: p.signal,
+                distance: dist,
+                approachDir: p.approachDir,
+                intersectionPos: p.intersectionPos,
+                controlPoint: p,
+                poleWorldPosition: p.poleWorldPosition ? p.poleWorldPosition.clone() : null
+            };
+        }
+    });
+
+    return closest;
+}
+
+/**
+ * Update traffic light compliance state machine and return effective target speed
+ * (only modifies target speed; steering is unchanged)
+ */
+function applyTrafficLightCompliance(baseTargetSpeed) {
+    if (!autopilot.enabled || trafficLights.length === 0) return baseTargetSpeed;
+
+    const pos = new THREE.Vector3(vehicle.x, 0, vehicle.z);
+    const heading = vehicle.angle;
+    const active = getActiveTrafficLight(pos, heading);
+
+    autopilot.activeLight = active;
+
+    // No relevant light: reset yellow decision, normal driving
+    if (!active) {
+        autopilot.yellowDecision = null;
+        if (autopilot.drivingState === 'STOPPED' || autopilot.drivingState === 'PROCEEDING') {
+            autopilot.drivingState = 'NORMAL';
+        } else if (autopilot.drivingState !== 'NORMAL') {
+            autopilot.drivingState = 'NORMAL';
+        }
+        return baseTargetSpeed;
+    }
+
+    const distToStop = active.distance;
+    const signal = active.signal;
+
+    // Past the stop line (we're beyond intersection): treat as no constraint
+    const pastStop = active.approachDir.dot(
+        new THREE.Vector3(vehicle.x - active.stopPoint.x, 0, vehicle.z - active.stopPoint.z)
+    ) > 2.0;
+    if (pastStop) {
+        autopilot.yellowDecision = null;
+        autopilot.drivingState = 'NORMAL';
+        return baseTargetSpeed;
+    }
+
+    // Yellow: lock decision on first detection
+    if (signal === 'YELLOW' && autopilot.yellowDecision === null) {
+        const canStop = distToStop > autopilot.minStoppingDistance;
+        autopilot.yellowDecision = canStop ? 'STOP' : 'GO';
+    }
+
+    const mustStop = signal === 'RED' || (signal === 'YELLOW' && autopilot.yellowDecision === 'STOP');
+
+    // State transitions
+    switch (autopilot.drivingState) {
+        case 'NORMAL':
+            if (mustStop && distToStop < autopilot.brakingDistance) {
+                autopilot.drivingState = vehicle.velocity > 0.5 ? 'STOPPING' : 'STOPPED';
+            } else if (mustStop && distToStop <= autopilot.brakingDistance * 1.2) {
+                autopilot.drivingState = 'APPROACHING_LIGHT';
+            }
+            break;
+        case 'APPROACHING_LIGHT':
+            if (!mustStop) {
+                autopilot.drivingState = 'PROCEEDING';
+            } else if (vehicle.velocity > 0.5 && distToStop < autopilot.brakingDistance) {
+                autopilot.drivingState = 'STOPPING';
+            } else if (vehicle.velocity <= 0.5 && distToStop < 5) {
+                autopilot.drivingState = 'STOPPED';
+            }
+            break;
+        case 'STOPPING':
+            if (vehicle.velocity <= 0.1 && distToStop <= autopilot.stopOffset + 2) {
+                autopilot.drivingState = 'STOPPED';
+            } else if (!mustStop) {
+                autopilot.drivingState = 'PROCEEDING';
+            }
+            break;
+        case 'STOPPED':
+            if (signal === 'GREEN') {
+                autopilot.yellowDecision = null;
+                autopilot.drivingState = 'PROCEEDING';
+            }
+            break;
+        case 'PROCEEDING':
+            if (distToStop > autopilot.brakingDistance) {
+                autopilot.drivingState = 'NORMAL';
+                autopilot.yellowDecision = null;
+            }
+            break;
+    }
+
+    // Compute effective target speed
+    if (autopilot.drivingState === 'STOPPED') {
+        return 0;
+    }
+    if (autopilot.drivingState === 'STOPPING' || (mustStop && autopilot.drivingState === 'APPROACHING_LIGHT')) {
+        if (distToStop <= 3) return 0;
+        const brakeStart = autopilot.brakingDistance;
+        const ratio = distToStop / brakeStart;
+        const smoothSpeed = baseTargetSpeed * Math.max(0, Math.min(1, ratio * ratio));
+        return Math.min(baseTargetSpeed, smoothSpeed);
+    }
+    if (autopilot.drivingState === 'PROCEEDING') {
+        return baseTargetSpeed; // Resume normal waypoint-following speed
+    }
+
+    return baseTargetSpeed;
+}
+
+/**
+ * Update traffic light debug visuals (stop point marker, active light highlight)
+ */
+function updateTrafficLightDebugVisuals() {
+    if (!trafficLightDebugGroup) {
+        trafficLightDebugGroup = new THREE.Group();
+        scene.add(trafficLightDebugGroup);
+    }
+    while (trafficLightDebugGroup.children.length > 0) {
+        trafficLightDebugGroup.remove(trafficLightDebugGroup.children[0]);
+    }
+
+    if (!autopilot.enabled || !autopilot.activeLight) return;
+
+    const active = autopilot.activeLight;
+    const stopPointGeo = new THREE.SphereGeometry(2.5, 16, 16);
+    const stopPointMat = new THREE.MeshBasicMaterial({
+        color: active.signal === 'GREEN' ? 0x00ff00 : active.signal === 'YELLOW' ? 0xffff00 : 0xff0000,
+        transparent: true,
+        opacity: 0.8
+    });
+    const stopMarker = new THREE.Mesh(stopPointGeo, stopPointMat);
+    stopMarker.position.copy(active.stopPoint);
+    stopMarker.position.y = 1.5;
+    trafficLightDebugGroup.add(stopMarker);
+
+    const ringGeo = new THREE.RingGeometry(2, 4, 32);
+    const ringMat = new THREE.MeshBasicMaterial({
+        color: 0xffffff,
+        side: THREE.DoubleSide,
+        transparent: true,
+        opacity: 0.6
+    });
+    const ring = new THREE.Mesh(ringGeo, ringMat);
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.copy(active.stopPoint);
+    trafficLightDebugGroup.add(ring);
+
+    // Highlight active traffic light pole (wireframe cylinder at base)
+    if (active.poleWorldPosition) {
+        const poleHighlightGeo = new THREE.CylinderGeometry(1.5, 1.5, 0.5, 16);
+        const poleHighlightMat = new THREE.MeshBasicMaterial({
+            color: 0x00ffff,
+            wireframe: true,
+            transparent: true,
+            opacity: 0.9
+        });
+        const poleHighlight = new THREE.Mesh(poleHighlightGeo, poleHighlightMat);
+        poleHighlight.position.copy(active.poleWorldPosition);
+        poleHighlight.position.y = 0.25;
+        trafficLightDebugGroup.add(poleHighlight);
+    }
+}
+
+// ============================================================================
 // AUTOPILOT UPDATE FUNCTION
 // ============================================================================
 
@@ -1870,7 +2153,10 @@ function updateAutopilot(deltaTime) {
     const curvature = computePathCurvature();
     
     // Step 5: Calculate target speed based on curvature
-    const targetSpeed = speedFromCurvature(curvature);
+    const baseTargetSpeed = speedFromCurvature(curvature);
+    
+    // Step 5b: Traffic light compliance (only modifies target speed; steering unchanged)
+    const targetSpeed = applyTrafficLightCompliance(baseTargetSpeed);
     
     // Smooth speed adjustment
     autopilot.currentSpeed = THREE.MathUtils.lerp(
@@ -1941,6 +2227,11 @@ function animate() {
     // Update waypoint marker visual
     if (autopilot.enabled) {
         updateWaypointMarker();
+    }
+
+    // Update traffic light compliance debug visuals
+    if (autopilot.enabled) {
+        updateTrafficLightDebugVisuals();
     }
 
     // Update UI
