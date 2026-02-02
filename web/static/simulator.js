@@ -1875,14 +1875,11 @@ function getTrafficLightControlPoints() {
 }
 
 /**
- * Get the active traffic light for the vehicle (closest valid light ahead).
- * Only the light for the vehicle's approach is considered: the vehicle must be on that
- * approach's side, driving toward the intersection (not just aligned by |dot|), the light
- * must be facing toward the vehicle, and when path direction is provided it must match 
- * the approach. This prevents using a perpendicular direction's green light.
+ * Get the active traffic light for the vehicle using a scoring system.
+ * Scores each light based on multiple factors and picks the best match.
  * @param {THREE.Vector3} vehiclePos
  * @param {number} vehicleHeading
- * @param {THREE.Vector3|null} pathDirection - optional; segment direction (toward next waypoint) for stricter matching
+ * @param {THREE.Vector3|null} pathDirection - optional; segment direction for better matching
  */
 function getActiveTrafficLight(vehiclePos, vehicleHeading, pathDirection) {
     const points = getTrafficLightControlPoints();
@@ -1892,80 +1889,115 @@ function getActiveTrafficLight(vehiclePos, vehicleHeading, pathDirection) {
     const vz = Math.cos(vehicleHeading);
     const forward = new THREE.Vector3(vx, 0, vz);
     const radius = autopilot.forwardSearchRadius;
-    const alignMin = autopilot.alignmentThreshold;
-    // Vehicle must be on this approach's side of the intersection
-    const approachSideMin = 0.5;
-    // If we have path direction, approach must match the road segment we're on
-    const pathAlignMin = 0.6;
-    // Light must be facing toward vehicle when in front of pole (cos ~72°); skipped when past pole
-    const facingMin = 0.2;
 
-    let closest = null;
-    let closestDist = Infinity;
+    let bestLight = null;
+    let bestScore = -Infinity;
+
     const vehicleToIntersection = new THREE.Vector3();
-    const lightToVehicle = new THREE.Vector3();
+    const toStop = new THREE.Vector3();
 
     points.forEach(p => {
-        const toStop = new THREE.Vector3(
+        toStop.set(
             p.stopPoint.x - vehiclePos.x,
             0,
             p.stopPoint.z - vehiclePos.z
         );
         const dist = toStop.length();
-        if (dist > radius) return;
-        toStop.normalize();
-        const ahead = toStop.dot(forward) > 0;
-        if (!ahead) return;
-        // Must be driving TOWARD the intersection on this approach (forward same direction as approachDir)
-        const align = p.approachDir.dot(forward);
-        if (align < alignMin) return;
 
-        // Directional filter: only this approach's light if we're on this approach's side
+        // Hard filter: must be within search radius
+        if (dist > radius) return;
+
+        toStop.normalize();
+
+        // Hard filter: must be generally ahead (not behind)
+        const aheadDot = toStop.dot(forward);
+        if (aheadDot < 0.2) return; // Very lenient - just not behind us
+
+        // === SCORING SYSTEM ===
+        let score = 0;
+
+        // Factor 1: Proximity (closer is better, exponential preference)
+        // Score range: 0 to 100
+        const proximityScore = 100 * Math.exp(-dist / 20.0);
+        score += proximityScore;
+
+        // Factor 2: Heading alignment (driving toward intersection in approach direction)
+        // Score range: 0 to 80
+        const align = p.approachDir.dot(forward);
+        const alignScore = Math.max(0, align) * 80;
+        score += alignScore;
+
+        // Factor 3: Stop point directly ahead (not off to the side)
+        // Score range: 0 to 60
+        const aheadScore = Math.max(0, aheadDot) * 60;
+        score += aheadScore;
+
+        // Factor 4: Vehicle is on the approach side of intersection
+        // Score range: 0 to 40
         vehicleToIntersection.set(
             p.intersectionPos.x - vehiclePos.x,
             0,
             p.intersectionPos.z - vehiclePos.z
         );
-        vehicleToIntersection.normalize();
-        if (vehicleToIntersection.dot(p.approachDir) < approachSideMin) return;
+        const distToIntersection = vehicleToIntersection.length();
+        if (distToIntersection > 0.1) {
+            vehicleToIntersection.normalize();
+            const onApproachSide = vehicleToIntersection.dot(p.approachDir);
+            const sideScore = Math.max(0, onApproachSide) * 40;
+            score += sideScore;
+        }
 
-        // Light facing check: verify the light face is pointing toward the vehicle (vehicle can see it).
-        // Skip when vehicle is past the pole (between pole and intersection): pole is ~8m from
-        // intersection, stop line is ~4m; once we're past the pole we still must obey the stop line.
-        const distVehicleToIntersectionAlongApproach = (p.intersectionPos.x - vehiclePos.x) * p.approachDir.x +
+        // Factor 5: Path direction matching (if available)
+        // Score range: 0 to 50
+        if (pathDirection && pathDirection.lengthSq() > 0.01) {
+            const pathAlign = p.approachDir.dot(pathDirection);
+            const pathScore = Math.max(0, pathAlign) * 50;
+            score += pathScore;
+        }
+
+        // Factor 6: Light facing toward vehicle (optional bonus)
+        // Score range: 0 to 30
+        const distAlongApproach =
+            (p.intersectionPos.x - vehiclePos.x) * p.approachDir.x +
             (p.intersectionPos.z - vehiclePos.z) * p.approachDir.z;
-        const pastPole = distVehicleToIntersectionAlongApproach < 8.0;
+        const pastPole = distAlongApproach < 8.0;
+
         if (!pastPole && p.poleWorldPosition && p.lightFacing) {
-            lightToVehicle.set(
+            const lightToVehicle = new THREE.Vector3(
                 vehiclePos.x - p.poleWorldPosition.x,
                 0,
                 vehiclePos.z - p.poleWorldPosition.z
             );
-            lightToVehicle.normalize();
-            const facing = p.lightFacing.dot(lightToVehicle);
-            if (facing < facingMin) return; // Light not facing vehicle
+            if (lightToVehicle.lengthSq() > 0.01) {
+                lightToVehicle.normalize();
+                const facing = p.lightFacing.dot(lightToVehicle);
+                const facingScore = Math.max(0, facing) * 30;
+                score += facingScore;
+            }
         }
 
-        // When path direction is available, require approach to match the current road segment
-        if (pathDirection && pathDirection.lengthSq() > 0.01) {
-            if (p.approachDir.dot(pathDirection) < pathAlignMin) return;
-        }
-
-        if (dist < closestDist) {
-            closestDist = dist;
-            closest = {
+        // Update best light if this scores higher
+        if (score > bestScore) {
+            bestScore = score;
+            bestLight = {
                 stopPoint: p.stopPoint,
                 signal: p.signal,
                 distance: dist,
                 approachDir: p.approachDir,
                 intersectionPos: p.intersectionPos,
                 controlPoint: p,
-                poleWorldPosition: p.poleWorldPosition ? p.poleWorldPosition.clone() : null
+                poleWorldPosition: p.poleWorldPosition ? p.poleWorldPosition.clone() : null,
+                score: score // For debugging
             };
         }
     });
 
-    return closest;
+    // Optional: Log the best light selection for debugging
+    if (bestLight && autopilot.enabled) {
+        console.log(`Selected light: dist=${bestLight.distance.toFixed(1)}m, signal=${bestLight.signal}, score=${bestScore.toFixed(1)}`);
+    }
+
+    return bestLight;
 }
 
 /**
