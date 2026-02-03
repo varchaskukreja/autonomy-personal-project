@@ -2123,9 +2123,10 @@ function getActiveTrafficLight(vehiclePos, vehicleHeading, pathDirection) {
         // Cross-traffic: dot ~0 (perpendicular)
         // Oncoming traffic: dot < 0 (opposite direction)
         const approachAlignment = p.approachDir.dot(forward);
-        if (approachAlignment < 0.4) {
+        const alignThreshold = autopilot.alignmentThreshold;
+        if (approachAlignment < alignThreshold) {
             scoreBreakdown.filtered = true;
-            scoreBreakdown.filterReason = `wrong lane/cross-traffic (approachAlign=${approachAlignment.toFixed(2)} < 0.4)`;
+            scoreBreakdown.filterReason = `wrong lane/cross-traffic (approachAlign=${approachAlignment.toFixed(2)} < ${alignThreshold})`;
             if (autopilot.debugScoring) candidateScores.push(scoreBreakdown);
             return;
         }
