@@ -73,6 +73,18 @@
         <p id="autopilotStatus" style="color: #888; display: none;"></p>
         <p id="trafficLightStatus" style="color: #888; display: none;"></p>
         <p id="mapStatus" style="color: #ffaa00;">Loading Fremont map...</p>
+        <div id="debugSection" style="margin-top: 15px; padding-top: 15px; border-top: 1px solid rgba(255,255,255,0.2); display: none;">
+            <p><strong>Debug Options:</strong> <span class="key">L</span> Toggle Visuals</p>
+            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin: 5px 0;">
+                <input type="checkbox" id="debugScoringConsole" style="width: 16px; height: 16px;">
+                <span>Console Log Scoring</span>
+            </label>
+            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin: 5px 0;">
+                <input type="checkbox" id="debugScoringVisuals" style="width: 16px; height: 16px;">
+                <span>Show Scoring Visuals</span>
+            </label>
+            <p id="scoringInfo" style="font-size: 11px; color: #aaa; margin-top: 8px;"></p>
+        </div>
     </div>
 
     <script type="importmap">

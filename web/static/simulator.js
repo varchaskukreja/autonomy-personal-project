@@ -117,7 +117,21 @@ const autopilot = {
     stopOffset: 4.0,           // m - stop point = intersection - approachDir * stopOffset (buffer to avoid overshoot)
     forwardSearchRadius: 80.0,  // m - only consider lights within this ahead
     alignmentThreshold: 0.7,    // cos(~45°) - approach dir must align with vehicle heading
-    stoppedAtIntersection: null // when STOPPED at red: { intersectionPos, approachDir } so we don't drive off after overshoot
+    stoppedAtIntersection: null, // when STOPPED at red: { intersectionPos, approachDir } so we don't drive off after overshoot
+
+    // Traffic Light Scoring Weights (configurable for tuning)
+    scoringWeights: {
+        proximity: 100,        // Closest light preferred (0-100)
+        headingAlignment: 80,  // Vehicle heading aligned with approach direction (0-80)
+        directlyAhead: 60,     // Stop point in front of vehicle (0-60)
+        pathMatching: 50,      // Waypoint direction matches light's approach direction (0-50)
+        approachSide: 40,      // Vehicle on the correct side of intersection (0-40)
+        lightFacing: 30        // Light faces vehicle (0-30)
+    },
+
+    // Debug settings for traffic light scoring
+    debugScoring: false,       // Enable detailed score breakdown logging
+    debugScoringVisuals: false // Enable visual debug indicators
 };
 
 // Debug visuals for autopilot
@@ -129,6 +143,7 @@ let waypointMarkerGroup = null;
 let stopPointMarker = null;
 let activeLightHighlight = null;
 let trafficLightDebugGroup = null;
+let scoringVisualsGroup = null; // For traffic light scoring debug visuals
 
 // Sky system
 let skyMesh, skyMaterial;
@@ -559,6 +574,15 @@ window.addEventListener('keydown', (e) => {
             e.preventDefault();
             toggleTopDownView();
         }
+    }
+
+    // L to toggle traffic light scoring visuals (when autopilot is enabled)
+    if (key === 'l' && autopilot.enabled) {
+        e.preventDefault();
+        autopilot.debugScoringVisuals = !autopilot.debugScoringVisuals;
+        const checkbox = document.getElementById('debugScoringVisuals');
+        if (checkbox) checkbox.checked = autopilot.debugScoringVisuals;
+        console.log(`Traffic light scoring visuals: ${autopilot.debugScoringVisuals ? 'ON' : 'OFF'}`);
     }
 });
 
@@ -1254,6 +1278,45 @@ if (document.readyState === 'loading') {
     setupTeleportUI();
 }
 
+// Wire up debug scoring controls
+function setupDebugControls() {
+    const debugSection = document.getElementById('debugSection');
+    const consoleCheckbox = document.getElementById('debugScoringConsole');
+    const visualsCheckbox = document.getElementById('debugScoringVisuals');
+    const scoringInfo = document.getElementById('scoringInfo');
+
+    if (!debugSection || !consoleCheckbox || !visualsCheckbox) {
+        // Retry if DOM not ready
+        setTimeout(setupDebugControls, 100);
+        return;
+    }
+
+    // Wire up console logging toggle
+    consoleCheckbox.addEventListener('change', (e) => {
+        autopilot.debugScoring = e.target.checked;
+        console.log(`Traffic light scoring debug logging: ${e.target.checked ? 'ON' : 'OFF'}`);
+    });
+
+    // Wire up visual debug toggle
+    visualsCheckbox.addEventListener('change', (e) => {
+        autopilot.debugScoringVisuals = e.target.checked;
+        console.log(`Traffic light scoring visuals: ${e.target.checked ? 'ON' : 'OFF'}`);
+    });
+
+    // Initialize checkbox states from autopilot settings
+    consoleCheckbox.checked = autopilot.debugScoring;
+    visualsCheckbox.checked = autopilot.debugScoringVisuals;
+
+    console.log('Debug controls initialized');
+}
+
+// Setup debug controls when DOM is ready
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', setupDebugControls);
+} else {
+    setupDebugControls();
+}
+
 // Update admin status indicator in UI
 function updateAdminStatus(message) {
     let statusEl = document.getElementById('adminStatus');
@@ -1359,10 +1422,26 @@ function updateUI() {
                 trafficLightStatusEl.style.color = '#888';
             }
         }
+
+        // Show debug section when autopilot is active
+        const debugSection = document.getElementById('debugSection');
+        if (debugSection) {
+            debugSection.style.display = 'block';
+            // Update scoring info
+            const scoringInfo = document.getElementById('scoringInfo');
+            if (scoringInfo && autopilot.activeLight && autopilot.activeLight.scoreBreakdown) {
+                const sb = autopilot.activeLight.scoreBreakdown;
+                scoringInfo.textContent = `Score: ${sb.total.toFixed(0)} (prox:${sb.proximity.toFixed(0)} head:${sb.headingAlignment.toFixed(0)} ahead:${sb.directlyAhead.toFixed(0)} side:${sb.approachSide.toFixed(0)} path:${sb.pathMatching.toFixed(0)} face:${sb.lightFacing.toFixed(0)})`;
+            } else if (scoringInfo) {
+                scoringInfo.textContent = '';
+            }
+        }
     } else if (waypointInfo) {
         waypointInfo.style.display = 'none';
         const trafficLightStatusEl = document.getElementById('trafficLightStatus');
         if (trafficLightStatusEl) trafficLightStatusEl.style.display = 'none';
+        const debugSection = document.getElementById('debugSection');
+        if (debugSection) debugSection.style.display = 'none';
     }
 
     // Debug: oscillation damping status
@@ -1889,14 +1968,16 @@ function getActiveTrafficLight(vehiclePos, vehicleHeading, pathDirection) {
     const vz = Math.cos(vehicleHeading);
     const forward = new THREE.Vector3(vx, 0, vz);
     const radius = autopilot.forwardSearchRadius;
+    const weights = autopilot.scoringWeights;
 
     let bestLight = null;
     let bestScore = -Infinity;
+    const candidateScores = []; // For debug output
 
     const vehicleToIntersection = new THREE.Vector3();
     const toStop = new THREE.Vector3();
 
-    points.forEach(p => {
+    points.forEach((p, index) => {
         toStop.set(
             p.stopPoint.x - vehiclePos.x,
             0,
@@ -1904,36 +1985,62 @@ function getActiveTrafficLight(vehiclePos, vehicleHeading, pathDirection) {
         );
         const dist = toStop.length();
 
+        // Initialize score breakdown for debugging
+        const scoreBreakdown = {
+            index,
+            distance: dist,
+            signal: p.signal,
+            filtered: false,
+            filterReason: null,
+            proximity: 0,
+            headingAlignment: 0,
+            directlyAhead: 0,
+            approachSide: 0,
+            pathMatching: 0,
+            lightFacing: 0,
+            total: 0
+        };
+
         // Hard filter: must be within search radius
-        if (dist > radius) return;
+        if (dist > radius) {
+            scoreBreakdown.filtered = true;
+            scoreBreakdown.filterReason = `distance ${dist.toFixed(1)}m > radius ${radius}m`;
+            if (autopilot.debugScoring) candidateScores.push(scoreBreakdown);
+            return;
+        }
 
         toStop.normalize();
 
         // Hard filter: must be generally ahead (not behind)
         const aheadDot = toStop.dot(forward);
-        if (aheadDot < 0.2) return; // Very lenient - just not behind us
+        if (aheadDot < 0.2) {
+            scoreBreakdown.filtered = true;
+            scoreBreakdown.filterReason = `behind vehicle (aheadDot=${aheadDot.toFixed(2)} < 0.2)`;
+            if (autopilot.debugScoring) candidateScores.push(scoreBreakdown);
+            return;
+        }
 
         // === SCORING SYSTEM ===
         let score = 0;
 
         // Factor 1: Proximity (closer is better, exponential preference)
-        // Score range: 0 to 100
-        const proximityScore = 100 * Math.exp(-dist / 20.0);
+        const proximityScore = weights.proximity * Math.exp(-dist / 20.0);
         score += proximityScore;
+        scoreBreakdown.proximity = proximityScore;
 
         // Factor 2: Heading alignment (driving toward intersection in approach direction)
-        // Score range: 0 to 80
         const align = p.approachDir.dot(forward);
-        const alignScore = Math.max(0, align) * 80;
+        const alignScore = Math.max(0, align) * weights.headingAlignment;
         score += alignScore;
+        scoreBreakdown.headingAlignment = alignScore;
 
         // Factor 3: Stop point directly ahead (not off to the side)
-        // Score range: 0 to 60
-        const aheadScore = Math.max(0, aheadDot) * 60;
+        const aheadScore = Math.max(0, aheadDot) * weights.directlyAhead;
         score += aheadScore;
+        scoreBreakdown.directlyAhead = aheadScore;
 
         // Factor 4: Vehicle is on the approach side of intersection
-        // Score range: 0 to 40
+        let sideScore = 0;
         vehicleToIntersection.set(
             p.intersectionPos.x - vehiclePos.x,
             0,
@@ -1943,20 +2050,22 @@ function getActiveTrafficLight(vehiclePos, vehicleHeading, pathDirection) {
         if (distToIntersection > 0.1) {
             vehicleToIntersection.normalize();
             const onApproachSide = vehicleToIntersection.dot(p.approachDir);
-            const sideScore = Math.max(0, onApproachSide) * 40;
+            sideScore = Math.max(0, onApproachSide) * weights.approachSide;
             score += sideScore;
         }
+        scoreBreakdown.approachSide = sideScore;
 
         // Factor 5: Path direction matching (if available)
-        // Score range: 0 to 50
+        let pathScore = 0;
         if (pathDirection && pathDirection.lengthSq() > 0.01) {
             const pathAlign = p.approachDir.dot(pathDirection);
-            const pathScore = Math.max(0, pathAlign) * 50;
+            pathScore = Math.max(0, pathAlign) * weights.pathMatching;
             score += pathScore;
         }
+        scoreBreakdown.pathMatching = pathScore;
 
         // Factor 6: Light facing toward vehicle (optional bonus)
-        // Score range: 0 to 30
+        let facingScore = 0;
         const distAlongApproach =
             (p.intersectionPos.x - vehiclePos.x) * p.approachDir.x +
             (p.intersectionPos.z - vehiclePos.z) * p.approachDir.z;
@@ -1971,10 +2080,14 @@ function getActiveTrafficLight(vehiclePos, vehicleHeading, pathDirection) {
             if (lightToVehicle.lengthSq() > 0.01) {
                 lightToVehicle.normalize();
                 const facing = p.lightFacing.dot(lightToVehicle);
-                const facingScore = Math.max(0, facing) * 30;
+                facingScore = Math.max(0, facing) * weights.lightFacing;
                 score += facingScore;
             }
         }
+        scoreBreakdown.lightFacing = facingScore;
+        scoreBreakdown.total = score;
+
+        if (autopilot.debugScoring) candidateScores.push(scoreBreakdown);
 
         // Update best light if this scores higher
         if (score > bestScore) {
@@ -1987,14 +2100,37 @@ function getActiveTrafficLight(vehiclePos, vehicleHeading, pathDirection) {
                 intersectionPos: p.intersectionPos,
                 controlPoint: p,
                 poleWorldPosition: p.poleWorldPosition ? p.poleWorldPosition.clone() : null,
-                score: score // For debugging
+                score: score,
+                scoreBreakdown: scoreBreakdown // Include breakdown for debugging
             };
         }
     });
 
-    // Optional: Log the best light selection for debugging
-    if (bestLight && autopilot.enabled) {
-        console.log(`Selected light: dist=${bestLight.distance.toFixed(1)}m, signal=${bestLight.signal}, score=${bestScore.toFixed(1)}`);
+    // Comprehensive debug output
+    if (autopilot.debugScoring && autopilot.enabled && candidateScores.length > 0) {
+        console.group('Traffic Light Scoring');
+        console.log(`Vehicle pos: (${vehiclePos.x.toFixed(1)}, ${vehiclePos.z.toFixed(1)}), heading: ${(vehicleHeading * 180 / Math.PI).toFixed(1)}°`);
+        console.log(`Path direction: ${pathDirection ? `(${pathDirection.x.toFixed(2)}, ${pathDirection.z.toFixed(2)})` : 'N/A'}`);
+        console.log(`Candidates: ${candidateScores.length}`);
+
+        candidateScores.sort((a, b) => b.total - a.total);
+
+        candidateScores.forEach((s, i) => {
+            if (s.filtered) {
+                console.log(`  [${i}] FILTERED: ${s.filterReason}`);
+            } else {
+                const isSelected = bestLight && s.total === bestLight.score;
+                const marker = isSelected ? '→' : ' ';
+                console.log(
+                    `${marker} [${i}] ${s.signal} dist=${s.distance.toFixed(1)}m | ` +
+                    `prox=${s.proximity.toFixed(1)} head=${s.headingAlignment.toFixed(1)} ` +
+                    `ahead=${s.directlyAhead.toFixed(1)} side=${s.approachSide.toFixed(1)} ` +
+                    `path=${s.pathMatching.toFixed(1)} face=${s.lightFacing.toFixed(1)} | ` +
+                    `TOTAL=${s.total.toFixed(1)}`
+                );
+            }
+        });
+        console.groupEnd();
     }
 
     return bestLight;
@@ -2209,6 +2345,189 @@ function updateTrafficLightDebugVisuals() {
     }
 }
 
+/**
+ * Update traffic light scoring debug visuals
+ * Shows lines from vehicle to each candidate light, color-coded by score
+ */
+function updateScoringDebugVisuals() {
+    // Initialize group if needed
+    if (!scoringVisualsGroup) {
+        scoringVisualsGroup = new THREE.Group();
+        scene.add(scoringVisualsGroup);
+    }
+
+    // Clear previous visuals
+    while (scoringVisualsGroup.children.length > 0) {
+        const child = scoringVisualsGroup.children[0];
+        if (child.geometry) child.geometry.dispose();
+        if (child.material) {
+            if (Array.isArray(child.material)) {
+                child.material.forEach(m => m.dispose());
+            } else {
+                child.material.dispose();
+            }
+        }
+        scoringVisualsGroup.remove(child);
+    }
+
+    if (!autopilot.enabled || !autopilot.debugScoringVisuals) return;
+
+    const vehiclePos = new THREE.Vector3(vehicle.x, 0, vehicle.z);
+    const vehicleHeading = vehicle.angle;
+    const pathDir = getPathDirectionTowardNextWaypoint();
+
+    // Get all traffic light control points and compute scores
+    const points = getTrafficLightControlPoints();
+    if (points.length === 0) return;
+
+    const vx = Math.sin(vehicleHeading);
+    const vz = Math.cos(vehicleHeading);
+    const forward = new THREE.Vector3(vx, 0, vz);
+    const radius = autopilot.forwardSearchRadius;
+    const weights = autopilot.scoringWeights;
+
+    const scoredPoints = [];
+    let maxScore = 0;
+    let bestIndex = -1;
+
+    points.forEach((p, index) => {
+        const toStop = new THREE.Vector3(
+            p.stopPoint.x - vehiclePos.x,
+            0,
+            p.stopPoint.z - vehiclePos.z
+        );
+        const dist = toStop.length();
+
+        // Check hard filters
+        if (dist > radius) {
+            scoredPoints.push({ point: p, score: -1, filtered: true, reason: 'distance' });
+            return;
+        }
+
+        const toStopNorm = toStop.clone().normalize();
+        const aheadDot = toStopNorm.dot(forward);
+
+        if (aheadDot < 0.2) {
+            scoredPoints.push({ point: p, score: -1, filtered: true, reason: 'behind' });
+            return;
+        }
+
+        // Calculate score (simplified version for visualization)
+        let score = 0;
+        score += weights.proximity * Math.exp(-dist / 20.0);
+        score += Math.max(0, p.approachDir.dot(forward)) * weights.headingAlignment;
+        score += Math.max(0, aheadDot) * weights.directlyAhead;
+
+        const vehicleToIntersection = new THREE.Vector3(
+            p.intersectionPos.x - vehiclePos.x,
+            0,
+            p.intersectionPos.z - vehiclePos.z
+        ).normalize();
+        score += Math.max(0, vehicleToIntersection.dot(p.approachDir)) * weights.approachSide;
+
+        if (pathDir && pathDir.lengthSq() > 0.01) {
+            score += Math.max(0, p.approachDir.dot(pathDir)) * weights.pathMatching;
+        }
+
+        scoredPoints.push({ point: p, score, filtered: false, index });
+
+        if (score > maxScore) {
+            maxScore = score;
+            bestIndex = index;
+        }
+    });
+
+    // Draw visuals for each scored point
+    scoredPoints.forEach((sp, i) => {
+        const p = sp.point;
+        const stopPos = p.stopPoint.clone();
+        stopPos.y = 2;
+
+        const vehicleDrawPos = vehiclePos.clone();
+        vehicleDrawPos.y = 2;
+
+        // Create line from vehicle to stop point
+        const lineGeometry = new THREE.BufferGeometry().setFromPoints([vehicleDrawPos, stopPos]);
+
+        let lineColor;
+        if (sp.filtered) {
+            lineColor = 0x666666; // Gray for filtered
+        } else if (sp.index === bestIndex) {
+            lineColor = 0x00ff00; // Green for selected
+        } else {
+            // Gradient from red (low score) to yellow (high score)
+            const normalizedScore = maxScore > 0 ? sp.score / maxScore : 0;
+            const r = 1.0;
+            const g = normalizedScore;
+            const b = 0;
+            lineColor = new THREE.Color(r, g, b);
+        }
+
+        const lineMaterial = new THREE.LineBasicMaterial({
+            color: lineColor,
+            transparent: true,
+            opacity: sp.filtered ? 0.3 : 0.8,
+            linewidth: sp.index === bestIndex ? 3 : 1
+        });
+
+        const line = new THREE.Line(lineGeometry, lineMaterial);
+        scoringVisualsGroup.add(line);
+
+        // Add score label (sphere with size based on score)
+        if (!sp.filtered) {
+            const normalizedScore = maxScore > 0 ? sp.score / maxScore : 0;
+            const sphereSize = 0.5 + normalizedScore * 1.5;
+
+            const sphereGeo = new THREE.SphereGeometry(sphereSize, 8, 8);
+            const sphereMat = new THREE.MeshBasicMaterial({
+                color: sp.index === bestIndex ? 0x00ff00 : 0xffaa00,
+                transparent: true,
+                opacity: 0.7
+            });
+            const sphere = new THREE.Mesh(sphereGeo, sphereMat);
+            sphere.position.copy(stopPos);
+            sphere.position.y = 4;
+            scoringVisualsGroup.add(sphere);
+
+            // Add ring around selected light
+            if (sp.index === bestIndex) {
+                const ringGeo = new THREE.RingGeometry(3, 4, 32);
+                const ringMat = new THREE.MeshBasicMaterial({
+                    color: 0x00ff00,
+                    side: THREE.DoubleSide,
+                    transparent: true,
+                    opacity: 0.5
+                });
+                const ring = new THREE.Mesh(ringGeo, ringMat);
+                ring.rotation.x = -Math.PI / 2;
+                ring.position.copy(p.intersectionPos);
+                ring.position.y = 0.1;
+                scoringVisualsGroup.add(ring);
+            }
+        }
+    });
+
+    // Draw approach direction arrows for each candidate
+    scoredPoints.forEach(sp => {
+        if (sp.filtered) return;
+
+        const p = sp.point;
+        const arrowStart = p.intersectionPos.clone();
+        arrowStart.y = 1;
+        const arrowEnd = arrowStart.clone().sub(p.approachDir.clone().multiplyScalar(10));
+        arrowEnd.y = 1;
+
+        const arrowGeometry = new THREE.BufferGeometry().setFromPoints([arrowStart, arrowEnd]);
+        const arrowMaterial = new THREE.LineBasicMaterial({
+            color: 0x00ffff,
+            transparent: true,
+            opacity: 0.5
+        });
+        const arrow = new THREE.Line(arrowGeometry, arrowMaterial);
+        scoringVisualsGroup.add(arrow);
+    });
+}
+
 // ============================================================================
 // AUTOPILOT UPDATE FUNCTION
 // ============================================================================
@@ -2372,6 +2691,7 @@ function animate() {
     // Update traffic light compliance debug visuals
     if (autopilot.enabled) {
         updateTrafficLightDebugVisuals();
+        updateScoringDebugVisuals();
     }
 
     // Update UI
