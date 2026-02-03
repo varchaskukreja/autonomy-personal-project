@@ -1918,26 +1918,107 @@ function getCurrentSignalForApproach(trafficLight, isNS) {
 }
 
 /**
- * Build list of traffic light control points (one per approach, straight only)
+ * Detect if the vehicle intends to turn based on upcoming waypoints.
+ * Returns 'left', 'right', or 'straight'
+ */
+function detectTurnIntent() {
+    if (!autopilot.waypoints || autopilot.waypoints.length < 3) return 'straight';
+
+    const idx = autopilot.currentWaypointIndex;
+    if (idx + 2 >= autopilot.waypoints.length) return 'straight';
+
+    const wp0 = autopilot.waypoints[idx];
+    const wp1 = autopilot.waypoints[idx + 1];
+    const wp2 = autopilot.waypoints[idx + 2];
+
+    // Direction from current to next waypoint
+    const dir1x = wp1.x - wp0.x;
+    const dir1z = wp1.z - wp0.z;
+    const len1 = Math.sqrt(dir1x * dir1x + dir1z * dir1z);
+
+    // Direction from next to next+1 waypoint
+    const dir2x = wp2.x - wp1.x;
+    const dir2z = wp2.z - wp1.z;
+    const len2 = Math.sqrt(dir2x * dir2x + dir2z * dir2z);
+
+    if (len1 < 0.1 || len2 < 0.1) return 'straight';
+
+    // Normalize
+    const n1x = dir1x / len1, n1z = dir1z / len1;
+    const n2x = dir2x / len2, n2z = dir2z / len2;
+
+    // Cross product Z (2D): positive = left turn, negative = right turn
+    const cross = n1x * n2z - n1z * n2x;
+
+    // Dot product for angle
+    const dot = n1x * n2x + n1z * n2z;
+    const angle = Math.acos(Math.max(-1, Math.min(1, dot)));
+
+    // Turn threshold: ~30 degrees
+    const TURN_THRESHOLD = Math.PI / 6;
+
+    if (angle > TURN_THRESHOLD) {
+        return cross > 0 ? 'left' : 'right';
+    }
+    return 'straight';
+}
+
+/**
+ * Build list of traffic light control points.
+ * Includes both straight and turn lights, with turn intent awareness.
  */
 function getTrafficLightControlPoints() {
     const points = [];
+    const turnIntent = detectTurnIntent();
+
     trafficLights.forEach(tl => {
         const intersectionPos = new THREE.Vector3(tl.intersection.position.x, 0, tl.intersection.position.z);
-        // One entry per approach: use only 'straight' lights to avoid duplicates
+
+        // Group lights by approach to handle straight vs turn lights properly
+        const approachLights = new Map(); // approachKey -> {straight: light, left: light}
+
         tl.lights.forEach(light => {
-            if (light.type !== 'straight') return;
+            const approachKey = `${light.approach.approachDirection.x.toFixed(3)}_${light.approach.approachDirection.z.toFixed(3)}`;
+            if (!approachLights.has(approachKey)) {
+                approachLights.set(approachKey, { straight: null, left: null });
+            }
+            if (light.type === 'straight') {
+                approachLights.get(approachKey).straight = light;
+            } else if (light.type === 'left') {
+                approachLights.get(approachKey).left = light;
+            }
+        });
+
+        // For each approach, select the appropriate light based on turn intent
+        approachLights.forEach((lights, approachKey) => {
+            // Prefer left-turn light if intending to turn left and one exists
+            // Otherwise use straight light
+            let selectedLight = lights.straight;
+            if (turnIntent === 'left' && lights.left) {
+                selectedLight = lights.left;
+            }
+
+            if (!selectedLight) return;
+
+            const light = selectedLight;
             const approachDir = light.approach.approachDirection.clone();
-            const signal = getCurrentSignalForApproach(tl, light.isNS);
+
+            // Get the correct signal for this light type
+            let signal;
+            if (light.type === 'left') {
+                signal = getCurrentLeftTurnSignal(tl, light.isNS);
+            } else {
+                signal = getCurrentSignalForApproach(tl, light.isNS);
+            }
+
             const stopOffset = autopilot.stopOffset;
             const stopPoint = intersectionPos.clone().sub(approachDir.clone().multiplyScalar(stopOffset));
             const poleWorld = new THREE.Vector3();
             light.mesh.group.getWorldPosition(poleWorld);
-            
+
             // Light facing direction: lights are rotated to face incoming traffic (opposite to approachDir)
-            // approachDir points toward intersection, light faces back toward traffic
             const lightFacing = approachDir.clone().multiplyScalar(-1);
-            
+
             points.push({
                 intersectionPos: intersectionPos.clone(),
                 approachDir,
@@ -1946,11 +2027,25 @@ function getTrafficLightControlPoints() {
                 trafficLight: tl,
                 approach: light.approach,
                 poleWorldPosition: poleWorld.clone(),
-                lightFacing: lightFacing // Direction the light face points (toward incoming traffic)
+                lightFacing: lightFacing,
+                lightType: light.type,
+                turnIntent: turnIntent
             });
         });
     });
     return points;
+}
+
+/**
+ * Get the current signal for a left-turn light
+ */
+function getCurrentLeftTurnSignal(trafficLight, isNS) {
+    const phase = trafficLight.signalState.currentPhase;
+    // Left turn phases: NS_LEFT gives green to NS left-turners, EW_LEFT to EW left-turners
+    if (phase === 'NS_LEFT') return isNS ? 'GREEN' : 'RED';
+    if (phase === 'EW_LEFT') return isNS ? 'RED' : 'GREEN';
+    // During straight phases, left-turn is red
+    return 'RED';
 }
 
 /**
@@ -1990,6 +2085,8 @@ function getActiveTrafficLight(vehiclePos, vehicleHeading, pathDirection) {
             index,
             distance: dist,
             signal: p.signal,
+            lightType: p.lightType || 'straight',
+            turnIntent: p.turnIntent || 'straight',
             filtered: false,
             filterReason: null,
             proximity: 0,
@@ -2011,11 +2108,24 @@ function getActiveTrafficLight(vehiclePos, vehicleHeading, pathDirection) {
 
         toStop.normalize();
 
-        // Hard filter: must be generally ahead (not behind)
+        // Hard filter: must be ahead of vehicle (tighter threshold to avoid side lights)
         const aheadDot = toStop.dot(forward);
-        if (aheadDot < 0.2) {
+        if (aheadDot < 0.5) {
             scoreBreakdown.filtered = true;
-            scoreBreakdown.filterReason = `behind vehicle (aheadDot=${aheadDot.toFixed(2)} < 0.2)`;
+            scoreBreakdown.filterReason = `not ahead (aheadDot=${aheadDot.toFixed(2)} < 0.5)`;
+            if (autopilot.debugScoring) candidateScores.push(scoreBreakdown);
+            return;
+        }
+
+        // Hard filter: reject cross-traffic and oncoming traffic lights
+        // approachDir points toward the intersection (direction of travel)
+        // For our lane: approachDir should roughly match our heading (positive dot)
+        // Cross-traffic: dot ~0 (perpendicular)
+        // Oncoming traffic: dot < 0 (opposite direction)
+        const approachAlignment = p.approachDir.dot(forward);
+        if (approachAlignment < 0.4) {
+            scoreBreakdown.filtered = true;
+            scoreBreakdown.filterReason = `wrong lane/cross-traffic (approachAlign=${approachAlignment.toFixed(2)} < 0.4)`;
             if (autopilot.debugScoring) candidateScores.push(scoreBreakdown);
             return;
         }
@@ -2111,18 +2221,19 @@ function getActiveTrafficLight(vehiclePos, vehicleHeading, pathDirection) {
         console.group('Traffic Light Scoring');
         console.log(`Vehicle pos: (${vehiclePos.x.toFixed(1)}, ${vehiclePos.z.toFixed(1)}), heading: ${(vehicleHeading * 180 / Math.PI).toFixed(1)}°`);
         console.log(`Path direction: ${pathDirection ? `(${pathDirection.x.toFixed(2)}, ${pathDirection.z.toFixed(2)})` : 'N/A'}`);
+        console.log(`Turn intent: ${candidateScores[0]?.turnIntent || 'straight'}`);
         console.log(`Candidates: ${candidateScores.length}`);
 
         candidateScores.sort((a, b) => b.total - a.total);
 
         candidateScores.forEach((s, i) => {
             if (s.filtered) {
-                console.log(`  [${i}] FILTERED: ${s.filterReason}`);
+                console.log(`  [${i}] FILTERED (${s.lightType}): ${s.filterReason}`);
             } else {
                 const isSelected = bestLight && s.total === bestLight.score;
                 const marker = isSelected ? '→' : ' ';
                 console.log(
-                    `${marker} [${i}] ${s.signal} dist=${s.distance.toFixed(1)}m | ` +
+                    `${marker} [${i}] ${s.signal} (${s.lightType}) dist=${s.distance.toFixed(1)}m | ` +
                     `prox=${s.proximity.toFixed(1)} head=${s.headingAlignment.toFixed(1)} ` +
                     `ahead=${s.directlyAhead.toFixed(1)} side=${s.approachSide.toFixed(1)} ` +
                     `path=${s.pathMatching.toFixed(1)} face=${s.lightFacing.toFixed(1)} | ` +
