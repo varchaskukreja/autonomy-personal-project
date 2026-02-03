@@ -63,7 +63,7 @@ const vehicle = {
     tiltTarget: 0 // target tilt for smooth interpolation
 };
 
-// Autopilot state
+// Autopilot state - UPDATED VALUES
 const autopilot = {
     enabled: false,
     waypoints: [], // Array of {x, z} in simulator coordinates
@@ -108,25 +108,25 @@ const autopilot = {
     currentSpeed: 0,            // Smoothed target speed
     lastWaypointDistance: Infinity, // Track distance to waypoint to detect passing
 
-    // Traffic light compliance (Phase 1)
+    // Traffic light compliance - UPDATED VALUES
     drivingState: 'NORMAL',     // NORMAL | APPROACHING_LIGHT | STOPPING | STOPPED | PROCEEDING
     activeLight: null,         // { stopPoint, signal, distance, approachDir, intersectionPos } or null
     yellowDecision: null,      // null | 'STOP' | 'GO' (locked once set for current yellow)
-    minStoppingDistance: 25.0,  // m - below this at yellow => commit to GO
-    brakingDistance: 40.0,     // m - start gradual decel when red and within this
-    stopOffset: 4.0,           // m - stop point = intersection - approachDir * stopOffset (buffer to avoid overshoot)
-    forwardSearchRadius: 80.0,  // m - only consider lights within this ahead
-    alignmentThreshold: 0.7,    // cos(~45°) - approach dir must align with vehicle heading
+    minStoppingDistance: 20.0,  // m - REDUCED: below this at yellow => commit to GO
+    brakingDistance: 50.0,     // m - INCREASED: start gradual decel when red and within this
+    stopOffset: 6.0,           // m - INCREASED: stop further from intersection
+    forwardSearchRadius: 100.0,  // m - INCREASED: look further ahead for lights
+    alignmentThreshold: 0.8,    // INCREASED: stricter alignment requirement (cos ~37°)
     stoppedAtIntersection: null, // when STOPPED at red: { intersectionPos, approachDir } so we don't drive off after overshoot
 
-    // Traffic Light Scoring Weights (configurable for tuning)
+    // Traffic Light Scoring Weights - REBALANCED
     scoringWeights: {
-        proximity: 100,        // Closest light preferred (0-100)
-        headingAlignment: 80,  // Vehicle heading aligned with approach direction (0-80)
-        directlyAhead: 60,     // Stop point in front of vehicle (0-60)
-        pathMatching: 50,      // Waypoint direction matches light's approach direction (0-50)
-        approachSide: 40,      // Vehicle on the correct side of intersection (0-40)
-        lightFacing: 30        // Light faces vehicle (0-30)
+        proximity: 80,         // REDUCED: Closest light preferred but not dominant
+        headingAlignment: 120, // INCREASED: Vehicle heading aligned with approach direction
+        directlyAhead: 80,     // INCREASED: Stop point in front of vehicle
+        pathMatching: 100,     // DOUBLED: Waypoint direction matches light's approach direction
+        approachSide: 60,      // INCREASED: Vehicle on the correct side of intersection
+        lightFacing: 20        // REDUCED: Light faces vehicle (less important)
     },
 
     // Debug settings for traffic light scoring
@@ -1902,7 +1902,7 @@ function computePurePursuitSteering(lookaheadPoint) {
 }
 
 // ============================================================================
-// TRAFFIC LIGHT COMPLIANCE (for autopilot)
+// TRAFFIC LIGHT COMPLIANCE (for autopilot) - FIXED VERSION
 // ============================================================================
 
 /**
@@ -1966,6 +1966,7 @@ function detectTurnIntent() {
 /**
  * Build list of traffic light control points.
  * Includes both straight and turn lights, with turn intent awareness.
+ * FIXED: Better filtering of cross-traffic lights
  */
 function getTrafficLightControlPoints() {
     const points = [];
@@ -2029,7 +2030,8 @@ function getTrafficLightControlPoints() {
                 poleWorldPosition: poleWorld.clone(),
                 lightFacing: lightFacing,
                 lightType: light.type,
-                turnIntent: turnIntent
+                turnIntent: turnIntent,
+                isNS: light.isNS // Include NS/EW classification for debugging
             });
         });
     });
@@ -2049,8 +2051,8 @@ function getCurrentLeftTurnSignal(trafficLight, isNS) {
 }
 
 /**
- * Get the active traffic light for the vehicle using a scoring system.
- * Scores each light based on multiple factors and picks the best match.
+ * Get the active traffic light for the vehicle using an improved scoring system.
+ * FIXED: Much stricter filtering to prevent selecting cross-traffic lights
  * @param {THREE.Vector3} vehiclePos
  * @param {number} vehicleHeading
  * @param {THREE.Vector3|null} pathDirection - optional; segment direction for better matching
@@ -2060,7 +2062,7 @@ function getActiveTrafficLight(vehiclePos, vehicleHeading, pathDirection) {
     if (points.length === 0) return null;
 
     const vx = Math.sin(vehicleHeading);
-    const vz = Math.cos(vehicleHeading);
+    const vz = -Math.cos(vehicleHeading); // Fixed: negative cos for proper forward direction
     const forward = new THREE.Vector3(vx, 0, vz);
     const radius = autopilot.forwardSearchRadius;
     const weights = autopilot.scoringWeights;
@@ -2087,6 +2089,7 @@ function getActiveTrafficLight(vehiclePos, vehicleHeading, pathDirection) {
             signal: p.signal,
             lightType: p.lightType || 'straight',
             turnIntent: p.turnIntent || 'straight',
+            isNS: p.isNS,
             filtered: false,
             filterReason: null,
             proximity: 0,
@@ -2108,74 +2111,95 @@ function getActiveTrafficLight(vehiclePos, vehicleHeading, pathDirection) {
 
         toStop.normalize();
 
-        // Hard filter: must be ahead of vehicle (tighter threshold to avoid side lights)
+        // Hard filter: must be ahead of vehicle (STRICTER threshold)
         const aheadDot = toStop.dot(forward);
-        if (aheadDot < 0.5) {
+        if (aheadDot < 0.6) { // Increased from 0.5 to 0.6 for stricter forward requirement
             scoreBreakdown.filtered = true;
-            scoreBreakdown.filterReason = `not ahead (aheadDot=${aheadDot.toFixed(2)} < 0.5)`;
+            scoreBreakdown.filterReason = `not ahead (aheadDot=${aheadDot.toFixed(2)} < 0.6)`;
             if (autopilot.debugScoring) candidateScores.push(scoreBreakdown);
             return;
         }
 
-        // Hard filter: reject cross-traffic and oncoming traffic lights
-        // approachDir points toward the intersection (direction of travel)
+        // CRITICAL FIX: Strict approach direction alignment
+        // approachDir points toward the intersection (direction of travel for that lane)
         // For our lane: approachDir should roughly match our heading (positive dot)
         // Cross-traffic: dot ~0 (perpendicular)
         // Oncoming traffic: dot < 0 (opposite direction)
         const approachAlignment = p.approachDir.dot(forward);
-        const alignThreshold = autopilot.alignmentThreshold;
-        if (approachAlignment < alignThreshold) {
+        
+        // MUCH stricter threshold: must be nearly parallel (cos(30°) ≈ 0.866)
+        const strictAlignThreshold = 0.8; // Was 0.7, now stricter
+        if (approachAlignment < strictAlignThreshold) {
             scoreBreakdown.filtered = true;
-            scoreBreakdown.filterReason = `wrong lane/cross-traffic (approachAlign=${approachAlignment.toFixed(2)} < ${alignThreshold})`;
+            scoreBreakdown.filterReason = `wrong lane/cross-traffic (approachAlign=${approachAlignment.toFixed(2)} < ${strictAlignThreshold})`;
             if (autopilot.debugScoring) candidateScores.push(scoreBreakdown);
             return;
         }
 
-        // === SCORING SYSTEM ===
-        let score = 0;
-
-        // Factor 1: Proximity (closer is better, exponential preference)
-        const proximityScore = weights.proximity * Math.exp(-dist / 20.0);
-        score += proximityScore;
-        scoreBreakdown.proximity = proximityScore;
-
-        // Factor 2: Heading alignment (driving toward intersection in approach direction)
-        const align = p.approachDir.dot(forward);
-        const alignScore = Math.max(0, align) * weights.headingAlignment;
-        score += alignScore;
-        scoreBreakdown.headingAlignment = alignScore;
-
-        // Factor 3: Stop point directly ahead (not off to the side)
-        const aheadScore = Math.max(0, aheadDot) * weights.directlyAhead;
-        score += aheadScore;
-        scoreBreakdown.directlyAhead = aheadScore;
-
-        // Factor 4: Vehicle is on the approach side of intersection
-        let sideScore = 0;
+        // ADDITIONAL FILTER: Check that vehicle is on the correct side of the intersection
+        // (approaching, not past it)
         vehicleToIntersection.set(
             p.intersectionPos.x - vehiclePos.x,
             0,
             p.intersectionPos.z - vehiclePos.z
         );
         const distToIntersection = vehicleToIntersection.length();
+        
         if (distToIntersection > 0.1) {
             vehicleToIntersection.normalize();
+            // Vehicle should be approaching from the approach direction side
+            const onApproachSide = vehicleToIntersection.dot(p.approachDir);
+            
+            // If negative, vehicle is on the wrong side (past the intersection)
+            if (onApproachSide < 0.2) { // Slightly more lenient to catch late detection
+                scoreBreakdown.filtered = true;
+                scoreBreakdown.filterReason = `past intersection (onApproachSide=${onApproachSide.toFixed(2)} < 0.2)`;
+                if (autopilot.debugScoring) candidateScores.push(scoreBreakdown);
+                return;
+            }
+        }
+
+        // === SCORING SYSTEM ===
+        let score = 0;
+
+        // Factor 1: Proximity (closer is better, but not too aggressive)
+        const proximityScore = weights.proximity * Math.exp(-dist / 25.0); // Slightly less aggressive
+        score += proximityScore;
+        scoreBreakdown.proximity = proximityScore;
+
+        // Factor 2: Heading alignment (driving toward intersection in approach direction)
+        // This is now the MOST important factor since cross-traffic is filtered
+        const alignScore = Math.pow(Math.max(0, approachAlignment), 2) * weights.headingAlignment; // Squared for stronger preference
+        score += alignScore;
+        scoreBreakdown.headingAlignment = alignScore;
+
+        // Factor 3: Stop point directly ahead (not off to the side)
+        const aheadScore = Math.pow(Math.max(0, aheadDot), 2) * weights.directlyAhead; // Squared
+        score += aheadScore;
+        scoreBreakdown.directlyAhead = aheadScore;
+
+        // Factor 4: Vehicle is on the approach side of intersection
+        let sideScore = 0;
+        if (distToIntersection > 0.1) {
             const onApproachSide = vehicleToIntersection.dot(p.approachDir);
             sideScore = Math.max(0, onApproachSide) * weights.approachSide;
             score += sideScore;
         }
         scoreBreakdown.approachSide = sideScore;
 
-        // Factor 5: Path direction matching (if available)
+        // Factor 5: Path direction matching (if available) - INCREASED WEIGHT
         let pathScore = 0;
         if (pathDirection && pathDirection.lengthSq() > 0.01) {
             const pathAlign = p.approachDir.dot(pathDirection);
-            pathScore = Math.max(0, pathAlign) * weights.pathMatching;
+            // Only count if strongly aligned
+            if (pathAlign > 0.7) {
+                pathScore = Math.pow(pathAlign, 2) * weights.pathMatching * 1.5; // Boosted
+            }
             score += pathScore;
         }
         scoreBreakdown.pathMatching = pathScore;
 
-        // Factor 6: Light facing toward vehicle (optional bonus)
+        // Factor 6: Light facing toward vehicle (bonus, not critical)
         let facingScore = 0;
         const distAlongApproach =
             (p.intersectionPos.x - vehiclePos.x) * p.approachDir.x +
@@ -2191,8 +2215,10 @@ function getActiveTrafficLight(vehiclePos, vehicleHeading, pathDirection) {
             if (lightToVehicle.lengthSq() > 0.01) {
                 lightToVehicle.normalize();
                 const facing = p.lightFacing.dot(lightToVehicle);
-                facingScore = Math.max(0, facing) * weights.lightFacing;
-                score += facingScore;
+                if (facing > 0.5) { // Only count if light is actually facing us
+                    facingScore = Math.max(0, facing) * weights.lightFacing;
+                    score += facingScore;
+                }
             }
         }
         scoreBreakdown.lightFacing = facingScore;
@@ -2221,6 +2247,7 @@ function getActiveTrafficLight(vehiclePos, vehicleHeading, pathDirection) {
     if (autopilot.debugScoring && autopilot.enabled && candidateScores.length > 0) {
         console.group('Traffic Light Scoring');
         console.log(`Vehicle pos: (${vehiclePos.x.toFixed(1)}, ${vehiclePos.z.toFixed(1)}), heading: ${(vehicleHeading * 180 / Math.PI).toFixed(1)}°`);
+        console.log(`Forward vector: (${forward.x.toFixed(2)}, ${forward.z.toFixed(2)})`);
         console.log(`Path direction: ${pathDirection ? `(${pathDirection.x.toFixed(2)}, ${pathDirection.z.toFixed(2)})` : 'N/A'}`);
         console.log(`Turn intent: ${candidateScores[0]?.turnIntent || 'straight'}`);
         console.log(`Candidates: ${candidateScores.length}`);
@@ -2229,12 +2256,12 @@ function getActiveTrafficLight(vehiclePos, vehicleHeading, pathDirection) {
 
         candidateScores.forEach((s, i) => {
             if (s.filtered) {
-                console.log(`  [${i}] FILTERED (${s.lightType}): ${s.filterReason}`);
+                console.log(`  [${i}] FILTERED (${s.lightType}, ${s.isNS ? 'NS' : 'EW'}): ${s.filterReason}`);
             } else {
                 const isSelected = bestLight && s.total === bestLight.score;
                 const marker = isSelected ? '→' : ' ';
                 console.log(
-                    `${marker} [${i}] ${s.signal} (${s.lightType}) dist=${s.distance.toFixed(1)}m | ` +
+                    `${marker} [${i}] ${s.signal} (${s.lightType}, ${s.isNS ? 'NS' : 'EW'}) dist=${s.distance.toFixed(1)}m | ` +
                     `prox=${s.proximity.toFixed(1)} head=${s.headingAlignment.toFixed(1)} ` +
                     `ahead=${s.directlyAhead.toFixed(1)} side=${s.approachSide.toFixed(1)} ` +
                     `path=${s.pathMatching.toFixed(1)} face=${s.lightFacing.toFixed(1)} | ` +
@@ -2256,10 +2283,11 @@ function getPathDirectionTowardNextWaypoint() {
     if (!autopilot.waypoints || autopilot.waypoints.length < 2) return null;
     const idx = autopilot.currentWaypointIndex;
     if (idx >= autopilot.waypoints.length) return null;
-    const segStart = idx === 0 ? { x: vehicle.x, z: vehicle.z } : autopilot.waypoints[idx - 1];
+    
+    // Use current vehicle position to next waypoint for more accurate direction
     const segEnd = autopilot.waypoints[idx];
-    const dx = segEnd.x - segStart.x;
-    const dz = segEnd.z - segStart.z;
+    const dx = segEnd.x - vehicle.x;
+    const dz = segEnd.z - vehicle.z;
     const len = Math.sqrt(dx * dx + dz * dz);
     if (len < 0.1) return null;
     return new THREE.Vector3(dx / len, 0, dz / len);
@@ -2267,7 +2295,7 @@ function getPathDirectionTowardNextWaypoint() {
 
 /**
  * Update traffic light compliance state machine and return effective target speed
- * (only modifies target speed; steering is unchanged)
+ * FIXED: More aggressive braking, better stop point handling
  */
 function applyTrafficLightCompliance(baseTargetSpeed) {
     if (!autopilot.enabled || trafficLights.length === 0) return baseTargetSpeed;
@@ -2282,19 +2310,22 @@ function applyTrafficLightCompliance(baseTargetSpeed) {
     // No relevant light
     if (!active) {
         autopilot.yellowDecision = null;
-        // If we were STOPPED/STOPPING at a light and overshot (lost the light), stay stopped until past intersection center
+        // If we were STOPPED/STOPPING at a light and lost detection, check if we should stay stopped
         const stopped = autopilot.stoppedAtIntersection;
         if (stopped && (autopilot.drivingState === 'STOPPED' || autopilot.drivingState === 'STOPPING')) {
+            // Calculate if we've cleared the intersection
             const pastCenter = (vehicle.x - stopped.intersectionPos.x) * stopped.approachDir.x +
                 (vehicle.z - stopped.intersectionPos.z) * stopped.approachDir.z;
-            if (pastCenter < 8) {
-                // Not yet past intersection center; keep stopped so we don't drive through
+            
+            // Stay stopped until we're well past the intersection center (15m to be safe)
+            if (pastCenter < 15) {
                 return 0;
             }
             autopilot.stoppedAtIntersection = null;
         } else if (autopilot.stoppedAtIntersection) {
             autopilot.stoppedAtIntersection = null;
         }
+        
         if (autopilot.drivingState === 'STOPPED' || autopilot.drivingState === 'PROCEEDING') {
             autopilot.drivingState = 'NORMAL';
         } else if (autopilot.drivingState !== 'NORMAL') {
@@ -2306,23 +2337,44 @@ function applyTrafficLightCompliance(baseTargetSpeed) {
     const distToStop = active.distance;
     const signal = active.signal;
 
-    // Past the stop line (we're beyond intersection): treat as no constraint only after we've cleared the intersection
-    const pastStopPoint = active.approachDir.dot(
-        new THREE.Vector3(vehicle.x - active.stopPoint.x, 0, vehicle.z - active.stopPoint.z)
-    ) > 2.0;
+    // FIXED: Better "past stop line" detection
+    // Only consider past if we're well beyond the stop point AND past the intersection center
+    const vectorToStop = new THREE.Vector3(
+        active.stopPoint.x - vehicle.x,
+        0,
+        active.stopPoint.z - vehicle.z
+    );
+    const distanceAlongApproach = vectorToStop.dot(active.approachDir);
+    
+    // Positive means stop point is still ahead, negative means we've passed it
+    const pastStopPoint = distanceAlongApproach < -3.0; // 3m past stop point
+    
     const pastCenter = (vehicle.x - active.intersectionPos.x) * active.approachDir.x +
         (vehicle.z - active.intersectionPos.z) * active.approachDir.z;
-    if (pastStopPoint && pastCenter > 6) {
+    
+    // Only clear the light if we're BOTH past the stop point AND past the intersection center
+    if (pastStopPoint && pastCenter > 10) {
         autopilot.yellowDecision = null;
         autopilot.stoppedAtIntersection = null;
         autopilot.drivingState = 'NORMAL';
         return baseTargetSpeed;
     }
 
-    // Yellow: lock decision on first detection
+    // Yellow: lock decision on first detection (with better calculation)
     if (signal === 'YELLOW' && autopilot.yellowDecision === null) {
-        const canStop = distToStop > autopilot.minStoppingDistance;
+        // Calculate if we can stop safely
+        // Use physics: stopping distance = v² / (2 * deceleration)
+        const currentSpeed = Math.abs(vehicle.velocity);
+        const comfortableDecel = 4.0; // m/s² - comfortable deceleration
+        const stoppingDist = (currentSpeed * currentSpeed) / (2 * comfortableDecel);
+        
+        // Add safety margin
+        const canStop = distToStop > (stoppingDist + 5.0); // 5m safety margin
         autopilot.yellowDecision = canStop ? 'STOP' : 'GO';
+        
+        if (autopilot.debugScoring) {
+            console.log(`Yellow decision: ${autopilot.yellowDecision} (dist=${distToStop.toFixed(1)}m, stopping=${stoppingDist.toFixed(1)}m)`);
+        }
     }
 
     const mustStop = signal === 'RED' || (signal === 'YELLOW' && autopilot.yellowDecision === 'STOP');
@@ -2331,24 +2383,25 @@ function applyTrafficLightCompliance(baseTargetSpeed) {
     switch (autopilot.drivingState) {
         case 'NORMAL':
             if (mustStop && distToStop < autopilot.brakingDistance) {
-                autopilot.drivingState = vehicle.velocity > 0.5 ? 'STOPPING' : 'STOPPED';
+                autopilot.drivingState = Math.abs(vehicle.velocity) > 0.5 ? 'STOPPING' : 'STOPPED';
                 if (autopilot.drivingState === 'STOPPED') {
                     autopilot.stoppedAtIntersection = {
                         intersectionPos: active.intersectionPos.clone(),
                         approachDir: active.approachDir.clone()
                     };
                 }
-            } else if (mustStop && distToStop <= autopilot.brakingDistance * 1.2) {
+            } else if (mustStop && distToStop <= autopilot.brakingDistance * 1.5) {
                 autopilot.drivingState = 'APPROACHING_LIGHT';
             }
             break;
+            
         case 'APPROACHING_LIGHT':
             if (!mustStop) {
                 autopilot.drivingState = 'PROCEEDING';
                 autopilot.stoppedAtIntersection = null;
-            } else if (vehicle.velocity > 0.5 && distToStop < autopilot.brakingDistance) {
+            } else if (Math.abs(vehicle.velocity) > 0.5 && distToStop < autopilot.brakingDistance) {
                 autopilot.drivingState = 'STOPPING';
-            } else if (vehicle.velocity <= 0.5 && distToStop < 5) {
+            } else if (Math.abs(vehicle.velocity) <= 0.5 && distToStop < 8) {
                 autopilot.drivingState = 'STOPPED';
                 autopilot.stoppedAtIntersection = {
                     intersectionPos: active.intersectionPos.clone(),
@@ -2356,8 +2409,9 @@ function applyTrafficLightCompliance(baseTargetSpeed) {
                 };
             }
             break;
+            
         case 'STOPPING':
-            if (vehicle.velocity <= 0.1 && distToStop <= autopilot.stopOffset + 2) {
+            if (Math.abs(vehicle.velocity) <= 0.1 && distToStop <= autopilot.stopOffset + 5) {
                 autopilot.drivingState = 'STOPPED';
                 autopilot.stoppedAtIntersection = {
                     intersectionPos: active.intersectionPos.clone(),
@@ -2368,6 +2422,7 @@ function applyTrafficLightCompliance(baseTargetSpeed) {
                 autopilot.stoppedAtIntersection = null;
             }
             break;
+            
         case 'STOPPED':
             if (signal === 'GREEN') {
                 autopilot.yellowDecision = null;
@@ -2375,8 +2430,10 @@ function applyTrafficLightCompliance(baseTargetSpeed) {
                 autopilot.stoppedAtIntersection = null;
             }
             break;
+            
         case 'PROCEEDING':
-            if (distToStop > autopilot.brakingDistance) {
+            // Stay in proceeding until well past the intersection
+            if (pastCenter > 15) {
                 autopilot.drivingState = 'NORMAL';
                 autopilot.yellowDecision = null;
                 autopilot.stoppedAtIntersection = null;
@@ -2384,24 +2441,45 @@ function applyTrafficLightCompliance(baseTargetSpeed) {
             break;
     }
 
-    // Compute effective target speed
+    // FIXED: More aggressive speed control
     if (autopilot.drivingState === 'STOPPED') {
         return 0;
     }
+    
     if (autopilot.drivingState === 'STOPPING' || (mustStop && autopilot.drivingState === 'APPROACHING_LIGHT')) {
-        // Demand full stop well before the line to avoid overshooting (stop point is stopOffset m before intersection)
-        if (distToStop <= 6) return 0;
+        // MUCH more aggressive braking curve
+        // Stop well before the line (at stopOffset distance before intersection)
+        
+        if (distToStop <= 3.0) {
+            // Very close - full stop
+            return 0;
+        }
+        
+        if (distToStop <= 8.0) {
+            // Close - very slow crawl
+            return Math.min(2.0, baseTargetSpeed * 0.1);
+        }
+        
+        if (distToStop <= 15.0) {
+            // Medium distance - slow approach
+            const ratio = (distToStop - 3.0) / 12.0; // 3m to 15m range
+            return Math.min(baseTargetSpeed * 0.3, 5.0) * ratio;
+        }
+        
+        // Further out - gradual deceleration
         const brakeStart = autopilot.brakingDistance;
-        const ratio = distToStop / brakeStart;
-        const smoothSpeed = baseTargetSpeed * Math.max(0, Math.min(1, ratio * ratio));
-        return Math.min(baseTargetSpeed, smoothSpeed);
+        const ratio = Math.min(1.0, (distToStop - 15.0) / (brakeStart - 15.0));
+        const smoothSpeed = baseTargetSpeed * ratio * ratio; // Quadratic for smoother approach
+        return Math.max(0, Math.min(baseTargetSpeed, smoothSpeed));
     }
+    
     if (autopilot.drivingState === 'PROCEEDING') {
         return baseTargetSpeed; // Resume normal waypoint-following speed
     }
 
     return baseTargetSpeed;
 }
+
 
 /**
  * Update traffic light debug visuals (stop point marker, active light highlight)
