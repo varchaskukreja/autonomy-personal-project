@@ -117,6 +117,7 @@ const autopilot = {
     stopOffset: 3.0,           // m - INCREASED: stop further from intersection
     forwardSearchRadius: 100.0,  // m - INCREASED: look further ahead for lights
     showWaypoints: false,       // Admin-only: waypoint markers hidden by default, toggle with 'n' in admin mode
+    showTrafficLightDebug: false, // Admin-only: traffic-light debug visuals (stop-point spheres, pole highlights) hidden by default, toggle with 'n'
     alignmentThreshold: 0.8,    // INCREASED: stricter alignment requirement (cos ~37°)
     stoppedAtIntersection: null, // when STOPPED at red: { intersectionPos, approachDir } so we don't drive off after overshoot
 
@@ -591,14 +592,15 @@ window.addEventListener('keydown', (e) => {
         console.log(`Traffic light scoring visuals: ${autopilot.debugScoringVisuals ? 'ON' : 'OFF'}`);
     }
 
-    // N to toggle waypoint markers (admin only, when autopilot is enabled)
+    // N to toggle waypoint markers + traffic-light debug visuals (admin only, when autopilot is enabled)
     if (key === 'n' && autopilot.enabled && adminMode) {
         e.preventDefault();
         autopilot.showWaypoints = !autopilot.showWaypoints;
+        autopilot.showTrafficLightDebug = autopilot.showWaypoints;
         if (waypointMarkerGroup) waypointMarkerGroup.visible = autopilot.showWaypoints;
         const cb = document.getElementById('showWaypoints');
         if (cb) cb.checked = autopilot.showWaypoints;
-        console.log(`Waypoint markers: ${autopilot.showWaypoints ? 'ON' : 'OFF'}`);
+        console.log(`Waypoint markers + traffic-light debug: ${autopilot.showWaypoints ? 'ON' : 'OFF'}`);
     }
 });
 
@@ -1374,8 +1376,9 @@ function setupWaypointUI() {
             return;
         }
         autopilot.showWaypoints = e.target.checked;
+        autopilot.showTrafficLightDebug = autopilot.showWaypoints;
         if (waypointMarkerGroup) waypointMarkerGroup.visible = autopilot.showWaypoints;
-        console.log(`Waypoint markers: ${autopilot.showWaypoints ? 'ON' : 'OFF'}`);
+        console.log(`Waypoint markers + traffic-light debug: ${autopilot.showWaypoints ? 'ON' : 'OFF'}`);
     });
 
     console.log('Waypoint UI initialized');
@@ -1538,10 +1541,12 @@ function updateUI() {
         waypointInfo.style.color = '#00ff00';
         waypointInfo.style.display = 'block';
 
-        // Traffic light compliance status
+        // Traffic light compliance status (admin-only)
         const trafficLightStatusEl = document.getElementById('trafficLightStatus');
         if (trafficLightStatusEl) {
-            if (autopilot.activeLight) {
+            if (!adminMode) {
+                trafficLightStatusEl.style.display = 'none';
+            } else if (autopilot.activeLight) {
                 const state = autopilot.drivingState;
                 const signal = autopilot.activeLight.signal;
                 const dist = autopilot.activeLight.distance.toFixed(1);
@@ -1954,6 +1959,12 @@ function updateOscillationDebugUI() {
         ].join(';');
         document.body.appendChild(el);
     }
+
+    if (!adminMode) {
+        el.style.display = 'none';
+        return;
+    }
+    el.style.display = 'block';
 
     const active = !!autopilot.oscActive;
     const damping = (autopilot.dampingFactor ?? 1.0);
@@ -2635,7 +2646,7 @@ function updateTrafficLightDebugVisuals() {
         trafficLightDebugGroup.remove(trafficLightDebugGroup.children[0]);
     }
 
-    if (!autopilot.enabled || !autopilot.activeLight) return;
+    if (!autopilot.enabled || !autopilot.activeLight || !autopilot.showTrafficLightDebug) return;
 
     const active = autopilot.activeLight;
     const stopPointGeo = new THREE.SphereGeometry(2.5, 16, 16);
