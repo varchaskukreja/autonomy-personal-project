@@ -2853,10 +2853,15 @@ function updateAutopilot(deltaTime) {
     
     // Step 5: Calculate target speed based on curvature
     const baseTargetSpeed = speedFromCurvature(curvature);
-    
+
     // Step 5b: Traffic light compliance (only modifies target speed; steering unchanged)
-    const targetSpeed = applyTrafficLightCompliance(baseTargetSpeed);
-    
+    let targetSpeed = applyTrafficLightCompliance(baseTargetSpeed);
+
+    // Step 5c: Collision avoidance with AI cars (ego car avoids AI vehicles ahead)
+    if (typeof applyCollisionAvoidance === 'function' && aiCars && aiCars.length > 0) {
+        targetSpeed = applyCollisionAvoidance(vehicle, targetSpeed, true);
+    }
+
     // Smooth speed adjustment
     autopilot.currentSpeed = THREE.MathUtils.lerp(
         autopilot.currentSpeed,
@@ -2982,6 +2987,9 @@ function animate() {
     // Update traffic lights
     updateTrafficLights(deltaTime);
 
+    // Update AI cars
+    updateAICars(deltaTime);
+
     // Render
     renderer.render(scene, camera);
 }
@@ -3015,7 +3023,11 @@ async function loadMapData() {
         // Traffic lights initialization
         statusEl.textContent = "Initializing traffic lights...";
         initializeTrafficLights(mapData.roads, mapData.buildings);
-        
+
+        // AI cars initialization
+        statusEl.textContent = "Initializing AI cars...";
+        initializeAICars();
+
         // Debug: optionally show node markers (comment out for production)
         // renderDebugNodeMarkers(mapData.roads);
 
@@ -4107,6 +4119,1003 @@ function initializeTrafficLights(roads, buildings) {
     });
     
     console.log(`Created ${trafficLights.length} traffic light systems with ${trafficLights.reduce((sum, tl) => sum + tl.lights.length, 0)} total lights`);
+}
+
+// =========================
+// 🚗 AI Cars System
+// =========================
+
+// AI Cars Configuration Constants
+const AI_CARS_CONFIG = {
+    // Spawn constraints
+    MAX_AI_CARS: 8,                    // Maximum number of AI cars at once
+    SPAWN_DISTANCE_MIN: 30,            // Minimum spawn distance from ego (meters)
+    SPAWN_DISTANCE_MAX: 150,           // Maximum spawn distance from ego (meters)
+    MIN_SPACING_BETWEEN_CARS: 15,      // Minimum distance between AI cars (meters)
+    SPAWN_CHECK_INTERVAL: 2.0,         // How often to check for spawning (seconds)
+
+    // Despawn thresholds
+    DESPAWN_RADIUS: 400,               // Despawn when this far from camera (meters)
+    MAX_LIFETIME: 90,                  // Maximum lifetime in seconds (failsafe)
+    DESPAWN_CHECK_FRAMES: 15,          // Check despawn every N frames
+
+    // Path planning
+    PATH_LENGTH_MIN: 5,                // Minimum waypoints in path
+    PATH_LENGTH_MAX: 20,               // Maximum waypoints in path
+
+    // Intersection branching weights
+    TURN_WEIGHTS: {
+        STRAIGHT: 0.50,
+        RIGHT: 0.30,
+        LEFT: 0.20
+    },
+
+    // Driving behavior
+    TARGET_SPEED: 15.0,                // Base target speed (m/s)
+    MIN_TURN_SPEED: 6.0,               // Minimum speed during turns (m/s)
+    WAYPOINT_THRESHOLD: 10.0,          // Distance to consider waypoint reached (meters)
+
+    // Main roads only - AI cars will only spawn on these road types
+    MAIN_ROAD_TYPES: ['motorway', 'trunk', 'primary', 'secondary', 'tertiary'],
+
+    // Collision avoidance settings
+    COLLISION: {
+        CAR_LENGTH: 4.0,               // Approximate car length (meters)
+        CAR_WIDTH: 2.0,                // Approximate car width (meters)
+        SAFE_FOLLOWING_DISTANCE: 12.0, // Minimum following distance (meters)
+        EMERGENCY_BRAKE_DISTANCE: 6.0, // Distance for emergency braking (meters)
+        DETECTION_RANGE: 50.0,         // Range to detect other vehicles (meters)
+        DETECTION_ANGLE: Math.PI / 3,  // Forward cone angle (60 degrees each side)
+        LATERAL_AVOIDANCE_DIST: 4.0,   // Distance for lateral collision concern (meters)
+        SLOWDOWN_FACTOR: 0.3,          // Speed reduction when following (0-1)
+    },
+
+    // Visual
+    CAR_COLORS: [0x3498db, 0x2ecc71, 0x9b59b6, 0xe67e22, 0x1abc9c, 0x34495e, 0xf39c12, 0x7f8c8d]
+};
+
+// AI Cars state
+let aiCars = [];
+let aiCarsGroup = null;
+let lastSpawnCheck = 0;
+let frameCounter = 0;
+
+/**
+ * AI Car data structure
+ * @typedef {Object} AICar
+ * @property {THREE.Group} mesh - The 3D mesh group
+ * @property {Array<{x: number, z: number}>} path - Waypoints to follow
+ * @property {number} currentWaypointIndex - Current waypoint index
+ * @property {string|null} nextTurnDecision - 'LEFT' | 'RIGHT' | 'STRAIGHT' | null
+ * @property {number} spawnTime - When the car was spawned (seconds)
+ * @property {number} x - Current X position
+ * @property {number} z - Current Z position
+ * @property {number} angle - Current heading (radians)
+ * @property {number} velocity - Current speed (m/s)
+ * @property {number} steering - Current steering angle
+ * @property {number} steeringActual - Smoothed steering
+ * @property {string} drivingState - Traffic light compliance state
+ * @property {Object|null} activeLight - Currently tracked traffic light
+ */
+
+// =========================
+// 🚧 Collision Avoidance System
+// =========================
+
+/**
+ * Check if a target vehicle is in the forward detection cone of a source vehicle
+ * @param {Object} source - Source vehicle {x, z, angle}
+ * @param {Object} target - Target vehicle {x, z}
+ * @param {number} range - Detection range
+ * @param {number} halfAngle - Half of the detection cone angle
+ * @returns {Object|null} {distance, relativeAngle} if in cone, null otherwise
+ */
+function isVehicleInForwardCone(source, target, range, halfAngle) {
+    const dx = target.x - source.x;
+    const dz = target.z - source.z;
+    const distance = Math.sqrt(dx * dx + dz * dz);
+
+    if (distance > range || distance < 0.1) return null;
+
+    // Calculate angle to target relative to source's heading
+    const angleToTarget = Math.atan2(dx, -dz);
+    let relativeAngle = angleToTarget - source.angle;
+
+    // Normalize to [-PI, PI]
+    while (relativeAngle > Math.PI) relativeAngle -= 2 * Math.PI;
+    while (relativeAngle < -Math.PI) relativeAngle += 2 * Math.PI;
+
+    // Check if within cone
+    if (Math.abs(relativeAngle) <= halfAngle) {
+        return { distance, relativeAngle };
+    }
+
+    return null;
+}
+
+/**
+ * Check if two vehicles are on a collision course (approaching each other)
+ * @param {Object} vehicle1 - First vehicle {x, z, angle, velocity}
+ * @param {Object} vehicle2 - Second vehicle {x, z, angle, velocity}
+ * @returns {boolean} True if vehicles are approaching each other
+ */
+function areVehiclesApproaching(vehicle1, vehicle2) {
+    const dx = vehicle2.x - vehicle1.x;
+    const dz = vehicle2.z - vehicle1.z;
+
+    // Calculate relative velocity
+    const v1x = vehicle1.velocity * Math.sin(vehicle1.angle);
+    const v1z = -vehicle1.velocity * Math.cos(vehicle1.angle);
+    const v2x = vehicle2.velocity * Math.sin(vehicle2.angle);
+    const v2z = -vehicle2.velocity * Math.cos(vehicle2.angle);
+
+    const relVx = v1x - v2x;
+    const relVz = v1z - v2z;
+
+    // Dot product of relative position and relative velocity
+    // Negative means approaching
+    const approach = dx * relVx + dz * relVz;
+
+    return approach < 0;
+}
+
+/**
+ * Find all vehicles ahead of a given vehicle within detection range
+ * @param {Object} sourceVehicle - The vehicle doing the detection {x, z, angle, velocity}
+ * @param {boolean} isEgoCar - Whether this is the ego car (excludes ego from results)
+ * @returns {Array} Array of {vehicle, distance, relativeAngle, isApproaching}
+ */
+function findVehiclesAhead(sourceVehicle, isEgoCar = false) {
+    const detected = [];
+    const { DETECTION_RANGE, DETECTION_ANGLE } = AI_CARS_CONFIG.COLLISION;
+
+    // Check against ego car (if source is AI car)
+    if (!isEgoCar) {
+        const egoCheck = isVehicleInForwardCone(
+            sourceVehicle,
+            { x: vehicle.x, z: vehicle.z },
+            DETECTION_RANGE,
+            DETECTION_ANGLE
+        );
+        if (egoCheck) {
+            detected.push({
+                vehicle: vehicle,
+                isEgoCar: true,
+                distance: egoCheck.distance,
+                relativeAngle: egoCheck.relativeAngle,
+                isApproaching: areVehiclesApproaching(sourceVehicle, vehicle)
+            });
+        }
+    }
+
+    // Check against all AI cars
+    for (const aiCar of aiCars) {
+        // Skip self
+        if (aiCar === sourceVehicle) continue;
+
+        const check = isVehicleInForwardCone(
+            sourceVehicle,
+            { x: aiCar.x, z: aiCar.z },
+            DETECTION_RANGE,
+            DETECTION_ANGLE
+        );
+        if (check) {
+            detected.push({
+                vehicle: aiCar,
+                isEgoCar: false,
+                distance: check.distance,
+                relativeAngle: check.relativeAngle,
+                isApproaching: areVehiclesApproaching(sourceVehicle, aiCar)
+            });
+        }
+    }
+
+    // Sort by distance (closest first)
+    detected.sort((a, b) => a.distance - b.distance);
+
+    return detected;
+}
+
+/**
+ * Calculate speed adjustment for collision avoidance
+ * @param {Object} sourceVehicle - The vehicle to adjust
+ * @param {number} baseSpeed - The base target speed
+ * @param {boolean} isEgoCar - Whether this is the ego car
+ * @returns {number} Adjusted target speed
+ */
+function applyCollisionAvoidance(sourceVehicle, baseSpeed, isEgoCar = false) {
+    const {
+        SAFE_FOLLOWING_DISTANCE,
+        EMERGENCY_BRAKE_DISTANCE,
+        SLOWDOWN_FACTOR,
+        LATERAL_AVOIDANCE_DIST
+    } = AI_CARS_CONFIG.COLLISION;
+
+    const vehiclesAhead = findVehiclesAhead(sourceVehicle, isEgoCar);
+
+    if (vehiclesAhead.length === 0) {
+        return baseSpeed;
+    }
+
+    // Find the closest vehicle that's actually in our path
+    let closestThreat = null;
+    for (const detected of vehiclesAhead) {
+        // Check if vehicle is roughly in our lane (small relative angle)
+        // and we're approaching it
+        const inLane = Math.abs(detected.relativeAngle) < Math.PI / 6; // ~30 degrees
+        const lateralDist = detected.distance * Math.sin(Math.abs(detected.relativeAngle));
+
+        if (lateralDist < LATERAL_AVOIDANCE_DIST && (detected.isApproaching || detected.vehicle.velocity < sourceVehicle.velocity)) {
+            closestThreat = detected;
+            break;
+        }
+    }
+
+    if (!closestThreat) {
+        return baseSpeed;
+    }
+
+    const dist = closestThreat.distance;
+
+    // Emergency braking
+    if (dist <= EMERGENCY_BRAKE_DISTANCE) {
+        // Match or go slower than vehicle ahead
+        const aheadSpeed = closestThreat.isEgoCar ? vehicle.velocity : closestThreat.vehicle.velocity;
+        return Math.max(0, Math.min(aheadSpeed * 0.5, baseSpeed * 0.2));
+    }
+
+    // Gradual slowdown
+    if (dist <= SAFE_FOLLOWING_DISTANCE) {
+        const ratio = (dist - EMERGENCY_BRAKE_DISTANCE) / (SAFE_FOLLOWING_DISTANCE - EMERGENCY_BRAKE_DISTANCE);
+        const aheadSpeed = closestThreat.isEgoCar ? vehicle.velocity : closestThreat.vehicle.velocity;
+        // Blend between emergency speed and normal following speed
+        const minSpeed = Math.max(0, aheadSpeed * 0.8);
+        const targetSpeed = minSpeed + (baseSpeed - minSpeed) * ratio * SLOWDOWN_FACTOR;
+        return Math.min(baseSpeed, targetSpeed);
+    }
+
+    // Approaching but still far - slight slowdown if closing fast
+    if (closestThreat.isApproaching && dist < SAFE_FOLLOWING_DISTANCE * 2) {
+        const ratio = dist / (SAFE_FOLLOWING_DISTANCE * 2);
+        return baseSpeed * (0.7 + 0.3 * ratio);
+    }
+
+    return baseSpeed;
+}
+
+/**
+ * Get the closest vehicle (AI or ego) to a position
+ * @param {number} x - X position
+ * @param {number} z - Z position
+ * @param {Object} excludeVehicle - Vehicle to exclude from search
+ * @returns {Object|null} {vehicle, distance} or null
+ */
+function getClosestVehicle(x, z, excludeVehicle = null) {
+    let closest = null;
+    let minDist = Infinity;
+
+    // Check ego car
+    if (excludeVehicle !== vehicle) {
+        const dist = Math.sqrt((x - vehicle.x) ** 2 + (z - vehicle.z) ** 2);
+        if (dist < minDist) {
+            minDist = dist;
+            closest = { vehicle: vehicle, distance: dist, isEgoCar: true };
+        }
+    }
+
+    // Check AI cars
+    for (const aiCar of aiCars) {
+        if (aiCar === excludeVehicle) continue;
+        const dist = Math.sqrt((x - aiCar.x) ** 2 + (z - aiCar.z) ** 2);
+        if (dist < minDist) {
+            minDist = dist;
+            closest = { vehicle: aiCar, distance: dist, isEgoCar: false };
+        }
+    }
+
+    return closest;
+}
+
+// =========================
+// 🚗 AI Cars Core Functions
+// =========================
+
+/**
+ * Initialize AI cars system
+ */
+function initializeAICars() {
+    if (aiCarsGroup) {
+        scene.remove(aiCarsGroup);
+    }
+    aiCarsGroup = new THREE.Group();
+    scene.add(aiCarsGroup);
+    aiCars = [];
+    lastSpawnCheck = 0;
+    frameCounter = 0;
+    console.log('AI Cars system initialized');
+}
+
+/**
+ * Create an AI car mesh with a random color
+ * @param {number} colorIndex - Index into the color array
+ * @returns {THREE.Group} The car mesh group
+ */
+function createAICarMesh(colorIndex = 0) {
+    const color = AI_CARS_CONFIG.CAR_COLORS[colorIndex % AI_CARS_CONFIG.CAR_COLORS.length];
+    const group = new THREE.Group();
+
+    // Car body (slightly smaller than ego car)
+    const bodyGeometry = new THREE.BoxGeometry(1.8, 0.55, 3.6);
+    const bodyMaterial = new THREE.MeshPhongMaterial({ color });
+    const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+    body.position.y = 0.45;
+    body.castShadow = true;
+    group.add(body);
+
+    // Car roof
+    const roofGeometry = new THREE.BoxGeometry(1.6, 0.45, 1.8);
+    const roofMaterial = new THREE.MeshPhongMaterial({ color: new THREE.Color(color).multiplyScalar(0.8) });
+    const roof = new THREE.Mesh(roofGeometry, roofMaterial);
+    roof.position.set(0, 1.0, -0.25);
+    roof.castShadow = true;
+    group.add(roof);
+
+    // Wheels
+    const wheelGeometry = new THREE.CylinderGeometry(0.28, 0.28, 0.18, 12);
+    const wheelMaterial = new THREE.MeshPhongMaterial({ color: 0x222222 });
+
+    const wheelPositions = [
+        [-0.75, 0.28, 0.7],
+        [0.75, 0.28, 0.7],
+        [-0.75, 0.28, -0.7],
+        [0.75, 0.28, -0.7]
+    ];
+
+    wheelPositions.forEach(pos => {
+        const wheel = new THREE.Mesh(wheelGeometry, wheelMaterial);
+        wheel.position.set(pos[0], pos[1], pos[2]);
+        wheel.rotation.z = Math.PI / 2;
+        wheel.castShadow = true;
+        group.add(wheel);
+    });
+
+    return group;
+}
+
+/**
+ * Find road segments near a position
+ * @param {number} x - X coordinate
+ * @param {number} z - Z coordinate
+ * @param {number} radius - Search radius
+ * @returns {Array} Array of nearby road segments with their info
+ */
+function findNearbyRoadSegments(x, z, radius, mainRoadsOnly = false) {
+    if (!mapData || !mapData.roads) return [];
+
+    const nearbySegments = [];
+
+    mapData.roads.forEach((road, roadIdx) => {
+        if (!road.coordinates || road.coordinates.length < 2) return;
+
+        // Filter for main roads only if requested (for AI car spawning)
+        if (mainRoadsOnly && !AI_CARS_CONFIG.MAIN_ROAD_TYPES.includes(road.type)) {
+            return;
+        }
+
+        for (let i = 0; i < road.coordinates.length - 1; i++) {
+            const p1 = road.coordinates[i];
+            const p2 = road.coordinates[i + 1];
+
+            // Check if segment is within radius
+            const midX = (p1[0] + p2[0]) / 2;
+            const midZ = (p1[1] + p2[1]) / 2;
+            const dist = Math.sqrt((midX - x) ** 2 + (midZ - z) ** 2);
+
+            if (dist <= radius) {
+                // Calculate segment direction
+                const dx = p2[0] - p1[0];
+                const dz = p2[1] - p1[1];
+                const len = Math.sqrt(dx * dx + dz * dz);
+
+                if (len > 0.1) {
+                    nearbySegments.push({
+                        road,
+                        roadIdx,
+                        segmentIdx: i,
+                        start: { x: p1[0], z: p1[1] },
+                        end: { x: p2[0], z: p2[1] },
+                        direction: { x: dx / len, z: dz / len },
+                        distance: dist,
+                        length: len
+                    });
+                }
+            }
+        }
+    });
+
+    return nearbySegments;
+}
+
+/**
+ * Find intersections connected to a road segment
+ * @param {Object} segment - Road segment info
+ * @returns {Array} Connected intersections
+ */
+function findConnectedIntersections(segment) {
+    const connected = [];
+    const threshold = INTERSECTION_THRESHOLD * 2;
+
+    trafficLights.forEach(tl => {
+        const ix = tl.intersection.position.x;
+        const iz = tl.intersection.position.z;
+
+        // Check if intersection is near segment endpoints
+        const distToStart = Math.sqrt((ix - segment.start.x) ** 2 + (iz - segment.start.z) ** 2);
+        const distToEnd = Math.sqrt((ix - segment.end.x) ** 2 + (iz - segment.end.z) ** 2);
+
+        if (distToStart < threshold || distToEnd < threshold) {
+            connected.push({
+                intersection: tl.intersection,
+                trafficLight: tl,
+                atStart: distToStart < threshold,
+                atEnd: distToEnd < threshold
+            });
+        }
+    });
+
+    return connected;
+}
+
+/**
+ * Choose a turn decision at an intersection
+ * @returns {string} 'STRAIGHT' | 'LEFT' | 'RIGHT'
+ */
+function chooseTurnDecision() {
+    const rand = Math.random();
+    const { STRAIGHT, RIGHT, LEFT } = AI_CARS_CONFIG.TURN_WEIGHTS;
+
+    if (rand < STRAIGHT) return 'STRAIGHT';
+    if (rand < STRAIGHT + RIGHT) return 'RIGHT';
+    return 'LEFT';
+}
+
+/**
+ * Build a path for an AI car from a starting position
+ * @param {Object} startSegment - Starting road segment
+ * @param {number} startX - Starting X position
+ * @param {number} startZ - Starting Z position
+ * @returns {Array} Array of waypoints
+ */
+function buildAICarPath(startSegment, startX, startZ) {
+    const path = [];
+    const visited = new Set();
+
+    // Start with current position
+    path.push({ x: startX, z: startZ });
+
+    // Add points along the starting segment toward the end
+    const segEnd = startSegment.end;
+    path.push({ x: segEnd.x, z: segEnd.z });
+
+    // Track current position and direction
+    let currentPos = { x: segEnd.x, z: segEnd.z };
+    let currentDir = { ...startSegment.direction };
+    let currentRoad = startSegment.road;
+    let currentSegmentIdx = startSegment.segmentIdx;
+
+    // Build path by following roads
+    while (path.length < AI_CARS_CONFIG.PATH_LENGTH_MAX) {
+        // Look for next segment
+        let nextSegment = null;
+
+        // First, try to continue along the same road
+        if (currentSegmentIdx < currentRoad.coordinates.length - 2) {
+            const nextCoord = currentRoad.coordinates[currentSegmentIdx + 2];
+            nextSegment = {
+                end: { x: nextCoord[0], z: nextCoord[1] },
+                road: currentRoad,
+                segmentIdx: currentSegmentIdx + 1
+            };
+
+            // Calculate direction
+            const dx = nextSegment.end.x - currentPos.x;
+            const dz = nextSegment.end.z - currentPos.z;
+            const len = Math.sqrt(dx * dx + dz * dz);
+            if (len > 0.1) {
+                nextSegment.direction = { x: dx / len, z: dz / len };
+            } else {
+                nextSegment = null;
+            }
+        }
+
+        // If at end of road or no continuation, look for connected roads
+        if (!nextSegment) {
+            // Find nearby main roads that could continue the path
+            const nearbySegments = findNearbyRoadSegments(currentPos.x, currentPos.z, 15, true);
+
+            // Filter to segments that continue in a reasonable direction
+            const candidates = nearbySegments.filter(seg => {
+                // Skip same road same segment
+                if (seg.road === currentRoad && Math.abs(seg.segmentIdx - currentSegmentIdx) < 2) {
+                    return false;
+                }
+
+                // Check if segment starts near current position
+                const distToStart = Math.sqrt((seg.start.x - currentPos.x) ** 2 + (seg.start.z - currentPos.z) ** 2);
+                if (distToStart > 10) return false;
+
+                // Check direction compatibility based on turn decision
+                const turnDecision = chooseTurnDecision();
+                const dotProduct = currentDir.x * seg.direction.x + currentDir.z * seg.direction.z;
+                const crossProduct = currentDir.x * seg.direction.z - currentDir.z * seg.direction.x;
+
+                if (turnDecision === 'STRAIGHT' && dotProduct > 0.5) return true;
+                if (turnDecision === 'RIGHT' && crossProduct < -0.3) return true;
+                if (turnDecision === 'LEFT' && crossProduct > 0.3) return true;
+
+                // Accept any forward-ish direction as fallback
+                return dotProduct > 0;
+            });
+
+            if (candidates.length > 0) {
+                // Pick a random candidate
+                nextSegment = candidates[Math.floor(Math.random() * candidates.length)];
+            }
+        }
+
+        if (!nextSegment) {
+            // No valid continuation found, end path
+            break;
+        }
+
+        // Check for loops
+        const key = `${Math.round(nextSegment.end.x)},${Math.round(nextSegment.end.z)}`;
+        if (visited.has(key)) {
+            break;
+        }
+        visited.add(key);
+
+        // Add waypoint
+        path.push({ x: nextSegment.end.x, z: nextSegment.end.z });
+
+        // Update tracking
+        currentPos = { x: nextSegment.end.x, z: nextSegment.end.z };
+        if (nextSegment.direction) {
+            currentDir = nextSegment.direction;
+        }
+        currentRoad = nextSegment.road;
+        currentSegmentIdx = nextSegment.segmentIdx;
+    }
+
+    return path.length >= AI_CARS_CONFIG.PATH_LENGTH_MIN ? path : [];
+}
+
+/**
+ * Check if a spawn position is valid (proper spacing from other vehicles)
+ * @param {number} x - X coordinate
+ * @param {number} z - Z coordinate
+ * @returns {boolean} True if valid spawn position
+ */
+function isValidSpawnPosition(x, z) {
+    // Check distance from ego car
+    const distFromEgo = Math.sqrt((x - vehicle.x) ** 2 + (z - vehicle.z) ** 2);
+    if (distFromEgo < AI_CARS_CONFIG.SPAWN_DISTANCE_MIN) return false;
+
+    // Check distance from other AI cars
+    for (const aiCar of aiCars) {
+        const dist = Math.sqrt((x - aiCar.x) ** 2 + (z - aiCar.z) ** 2);
+        if (dist < AI_CARS_CONFIG.MIN_SPACING_BETWEEN_CARS) return false;
+    }
+
+    return true;
+}
+
+/**
+ * Try to spawn a new AI car near the ego vehicle
+ * @returns {AICar|null} The spawned car or null if spawning failed
+ */
+function trySpawnAICar() {
+    if (aiCars.length >= AI_CARS_CONFIG.MAX_AI_CARS) return null;
+    if (!mapData || !mapData.roads) return null;
+
+    // Find road segments near ego car (main roads only to avoid narrow/one-way streets)
+    const nearbySegments = findNearbyRoadSegments(
+        vehicle.x, vehicle.z,
+        AI_CARS_CONFIG.SPAWN_DISTANCE_MAX,
+        true  // mainRoadsOnly = true
+    );
+
+    if (nearbySegments.length === 0) return null;
+
+    // Filter to segments at valid spawn distance
+    const validSegments = nearbySegments.filter(seg => {
+        return seg.distance >= AI_CARS_CONFIG.SPAWN_DISTANCE_MIN &&
+               seg.distance <= AI_CARS_CONFIG.SPAWN_DISTANCE_MAX;
+    });
+
+    if (validSegments.length === 0) return null;
+
+    // Shuffle and try segments
+    const shuffled = validSegments.sort(() => Math.random() - 0.5);
+
+    for (const segment of shuffled) {
+        // Calculate spawn position along segment
+        const t = Math.random() * 0.6 + 0.2; // Spawn at 20-80% along segment
+        const spawnX = segment.start.x + t * (segment.end.x - segment.start.x);
+        const spawnZ = segment.start.z + t * (segment.end.z - segment.start.z);
+
+        if (!isValidSpawnPosition(spawnX, spawnZ)) continue;
+
+        // Build path from this position
+        const path = buildAICarPath(segment, spawnX, spawnZ);
+        if (path.length < AI_CARS_CONFIG.PATH_LENGTH_MIN) continue;
+
+        // Calculate initial angle (facing along segment direction)
+        const angle = Math.atan2(segment.direction.x, -segment.direction.z);
+
+        // Create the AI car
+        const colorIndex = aiCars.length;
+        const mesh = createAICarMesh(colorIndex);
+        mesh.position.set(spawnX, 0, spawnZ);
+        mesh.rotation.y = -angle;
+        aiCarsGroup.add(mesh);
+
+        const aiCar = {
+            mesh,
+            path,
+            currentWaypointIndex: 1, // Start heading to second waypoint (first is spawn pos)
+            nextTurnDecision: null,
+            spawnTime: performance.now() / 1000,
+            x: spawnX,
+            z: spawnZ,
+            angle,
+            velocity: AI_CARS_CONFIG.TARGET_SPEED * 0.5, // Start with some speed
+            steering: 0,
+            steeringActual: 0,
+            wheelbase: 2.3,
+            maxSteeringAngle: Math.PI / 5,
+            drivingState: 'NORMAL',
+            activeLight: null,
+            prevSteering: 0
+        };
+
+        aiCars.push(aiCar);
+        console.log(`Spawned AI car #${aiCars.length} at (${spawnX.toFixed(1)}, ${spawnZ.toFixed(1)}) with ${path.length} waypoints`);
+
+        return aiCar;
+    }
+
+    return null;
+}
+
+/**
+ * Compute Pure Pursuit steering for an AI car
+ * @param {AICar} aiCar - The AI car
+ * @returns {number} Steering angle
+ */
+function computeAICarSteering(aiCar) {
+    if (aiCar.currentWaypointIndex >= aiCar.path.length) {
+        return 0;
+    }
+
+    const wp = aiCar.path[aiCar.currentWaypointIndex];
+    if (!wp) return 0;
+
+    // Vector from car to waypoint
+    const dx = wp.x - aiCar.x;
+    const dz = wp.z - aiCar.z;
+
+    // Transform to car's local frame
+    const cosA = Math.cos(aiCar.angle);
+    const sinA = Math.sin(aiCar.angle);
+    const localX = dx * cosA + dz * sinA;
+    const localZ = -dx * sinA + dz * cosA;
+
+    // Lookahead distance based on speed
+    const speed = Math.max(Math.abs(aiCar.velocity), 3.0);
+    const lookahead = Math.max(4.0, speed * 0.8);
+
+    // Pure pursuit curvature
+    const distSq = localX * localX + localZ * localZ;
+    if (distSq < 0.01) return 0;
+
+    // Curvature = 2 * x / L²
+    const curvature = (2.0 * localX) / distSq;
+
+    // Convert to steering angle: delta = atan(curvature * wheelbase)
+    let steering = Math.atan(curvature * aiCar.wheelbase);
+
+    // Clamp to max steering
+    steering = Math.max(-aiCar.maxSteeringAngle, Math.min(aiCar.maxSteeringAngle, steering));
+
+    return steering;
+}
+
+/**
+ * Compute path curvature for speed adjustment
+ * @param {AICar} aiCar - The AI car
+ * @returns {number} Curvature value
+ */
+function computeAICarPathCurvature(aiCar) {
+    const lookahead = 4;
+    const start = aiCar.currentWaypointIndex;
+    const end = Math.min(start + lookahead, aiCar.path.length - 1);
+
+    if (end - start < 2) return 0;
+
+    let totalAngleChange = 0;
+    let totalDist = 0;
+
+    for (let i = start; i < end - 1; i++) {
+        const p1 = aiCar.path[i];
+        const p2 = aiCar.path[i + 1];
+        const p3 = aiCar.path[i + 2];
+
+        if (!p1 || !p2 || !p3) continue;
+
+        const dx1 = p2.x - p1.x;
+        const dz1 = p2.z - p1.z;
+        const dx2 = p3.x - p2.x;
+        const dz2 = p3.z - p2.z;
+
+        const len1 = Math.sqrt(dx1 * dx1 + dz1 * dz1);
+        const len2 = Math.sqrt(dx2 * dx2 + dz2 * dz2);
+
+        if (len1 < 0.1 || len2 < 0.1) continue;
+
+        // Calculate angle change
+        const dot = (dx1 * dx2 + dz1 * dz2) / (len1 * len2);
+        const angleChange = Math.acos(Math.max(-1, Math.min(1, dot)));
+
+        totalAngleChange += angleChange;
+        totalDist += len1;
+    }
+
+    return totalDist > 0 ? totalAngleChange / totalDist : 0;
+}
+
+/**
+ * Get the traffic light signal for an AI car
+ * @param {AICar} aiCar - The AI car
+ * @returns {Object|null} Active traffic light info
+ */
+function getAICarTrafficLight(aiCar) {
+    if (trafficLights.length === 0) return null;
+
+    const pos = new THREE.Vector3(aiCar.x, 0, aiCar.z);
+    const heading = aiCar.angle;
+
+    // Get direction toward next waypoint
+    let pathDir = new THREE.Vector3(0, 0, -1);
+    if (aiCar.currentWaypointIndex < aiCar.path.length) {
+        const wp = aiCar.path[aiCar.currentWaypointIndex];
+        const dx = wp.x - aiCar.x;
+        const dz = wp.z - aiCar.z;
+        const len = Math.sqrt(dx * dx + dz * dz);
+        if (len > 0.1) {
+            pathDir.set(dx / len, 0, dz / len);
+        }
+    }
+
+    // Use the same traffic light detection as the ego car
+    return getActiveTrafficLight(pos, heading, pathDir);
+}
+
+/**
+ * Apply traffic light compliance to AI car speed
+ * @param {AICar} aiCar - The AI car
+ * @param {number} baseSpeed - Base target speed
+ * @returns {number} Modified target speed
+ */
+function applyAICarTrafficLightCompliance(aiCar, baseSpeed) {
+    const active = getAICarTrafficLight(aiCar);
+    aiCar.activeLight = active;
+
+    if (!active) {
+        aiCar.drivingState = 'NORMAL';
+        return baseSpeed;
+    }
+
+    const distToStop = active.distance;
+    const signal = active.signal;
+
+    // Check if past the stop point
+    const vectorToStop = new THREE.Vector3(
+        active.stopPoint.x - aiCar.x,
+        0,
+        active.stopPoint.z - aiCar.z
+    );
+    const distanceAlongApproach = vectorToStop.dot(active.approachDir);
+
+    if (distanceAlongApproach < -5.0) {
+        aiCar.drivingState = 'NORMAL';
+        return baseSpeed;
+    }
+
+    const mustStop = signal === 'RED' || signal === 'YELLOW';
+
+    if (mustStop && distToStop < 50) {
+        aiCar.drivingState = 'STOPPING';
+
+        if (distToStop <= 3.0) {
+            return 0;
+        }
+        if (distToStop <= 8.0) {
+            return Math.min(2.0, baseSpeed * 0.1);
+        }
+        if (distToStop <= 15.0) {
+            const ratio = (distToStop - 3.0) / 12.0;
+            return Math.min(baseSpeed * 0.3, 5.0) * ratio;
+        }
+
+        const ratio = Math.min(1.0, (distToStop - 15.0) / 35.0);
+        return baseSpeed * ratio * ratio;
+    }
+
+    if (signal === 'GREEN') {
+        aiCar.drivingState = 'PROCEEDING';
+    }
+
+    return baseSpeed;
+}
+
+/**
+ * Update a single AI car
+ * @param {AICar} aiCar - The AI car
+ * @param {number} deltaTime - Time since last frame
+ */
+function updateAICar(aiCar, deltaTime) {
+    // Check if path is complete
+    if (aiCar.currentWaypointIndex >= aiCar.path.length) {
+        aiCar.velocity *= 0.95;
+        return;
+    }
+
+    // Check waypoint reached
+    const wp = aiCar.path[aiCar.currentWaypointIndex];
+    const dx = wp.x - aiCar.x;
+    const dz = wp.z - aiCar.z;
+    const distToWp = Math.sqrt(dx * dx + dz * dz);
+
+    if (distToWp < AI_CARS_CONFIG.WAYPOINT_THRESHOLD) {
+        aiCar.currentWaypointIndex++;
+    }
+
+    // Compute steering
+    const rawSteering = computeAICarSteering(aiCar);
+    aiCar.steering = THREE.MathUtils.lerp(aiCar.prevSteering, rawSteering, 0.12);
+    aiCar.prevSteering = aiCar.steering;
+
+    // Smooth steering
+    aiCar.steeringActual = THREE.MathUtils.lerp(aiCar.steeringActual, aiCar.steering, 6.0 * deltaTime);
+
+    // Compute target speed based on curvature
+    const curvature = computeAICarPathCurvature(aiCar);
+    const curvatureFactor = Math.max(0.3, 1.0 - curvature * 4.0);
+    let targetSpeed = AI_CARS_CONFIG.TARGET_SPEED * curvatureFactor;
+    targetSpeed = Math.max(targetSpeed, AI_CARS_CONFIG.MIN_TURN_SPEED);
+
+    // Apply traffic light compliance
+    targetSpeed = applyAICarTrafficLightCompliance(aiCar, targetSpeed);
+
+    // Apply collision avoidance (avoid ego car and other AI cars)
+    targetSpeed = applyCollisionAvoidance(aiCar, targetSpeed, false);
+
+    // Update velocity
+    const speedError = targetSpeed - aiCar.velocity;
+    if (speedError > 0.2) {
+        aiCar.velocity += 10.0 * deltaTime; // Accelerate
+    } else if (speedError < -0.2) {
+        aiCar.velocity -= 15.0 * deltaTime; // Brake
+    }
+    aiCar.velocity = Math.max(0, Math.min(AI_CARS_CONFIG.TARGET_SPEED * 1.2, aiCar.velocity));
+
+    // Update position using bicycle model
+    if (Math.abs(aiCar.velocity) > 0.1) {
+        const angularVel = (aiCar.velocity / aiCar.wheelbase) * Math.tan(aiCar.steeringActual);
+        aiCar.angle += angularVel * deltaTime;
+
+        // Normalize angle
+        while (aiCar.angle > Math.PI) aiCar.angle -= 2 * Math.PI;
+        while (aiCar.angle < -Math.PI) aiCar.angle += 2 * Math.PI;
+    }
+
+    aiCar.x += aiCar.velocity * Math.sin(aiCar.angle) * deltaTime;
+    aiCar.z -= aiCar.velocity * Math.cos(aiCar.angle) * deltaTime;
+
+    // Update mesh position and rotation
+    aiCar.mesh.position.set(aiCar.x, 0, aiCar.z);
+    aiCar.mesh.rotation.y = -aiCar.angle;
+}
+
+/**
+ * Check if an AI car should be despawned
+ * @param {AICar} aiCar - The AI car
+ * @param {number} currentTime - Current time in seconds
+ * @returns {boolean} True if car should be despawned
+ */
+function shouldDespawnAICar(aiCar, currentTime) {
+    // A. Camera-Distance Despawn
+    const distFromCamera = Math.sqrt(
+        (aiCar.x - camera.position.x) ** 2 +
+        (aiCar.z - camera.position.z) ** 2
+    );
+    if (distFromCamera > AI_CARS_CONFIG.DESPAWN_RADIUS) {
+        return true;
+    }
+
+    // B. Path Exhaustion Despawn
+    if (aiCar.currentWaypointIndex >= aiCar.path.length - 1) {
+        return true;
+    }
+
+    // C. Time-To-Live Failsafe
+    if (currentTime - aiCar.spawnTime > AI_CARS_CONFIG.MAX_LIFETIME) {
+        return true;
+    }
+
+    return false;
+}
+
+/**
+ * Despawn an AI car and clean up resources
+ * @param {number} index - Index of car to despawn
+ */
+function despawnAICar(index) {
+    const aiCar = aiCars[index];
+    if (!aiCar) return;
+
+    // Remove mesh from scene
+    aiCarsGroup.remove(aiCar.mesh);
+
+    // Dispose geometries and materials
+    aiCar.mesh.traverse(child => {
+        if (child.geometry) child.geometry.dispose();
+        if (child.material) child.material.dispose();
+    });
+
+    // Remove from array
+    aiCars.splice(index, 1);
+}
+
+/**
+ * Update all AI cars
+ * @param {number} deltaTime - Time since last frame
+ */
+function updateAICars(deltaTime) {
+    if (!aiCarsGroup) return;
+
+    const currentTime = performance.now() / 1000;
+    frameCounter++;
+
+    // Despawn check (every N frames)
+    if (frameCounter % AI_CARS_CONFIG.DESPAWN_CHECK_FRAMES === 0) {
+        for (let i = aiCars.length - 1; i >= 0; i--) {
+            if (shouldDespawnAICar(aiCars[i], currentTime)) {
+                console.log(`Despawning AI car #${i + 1} (${
+                    aiCars[i].currentWaypointIndex >= aiCars[i].path.length - 1 ? 'path complete' :
+                    currentTime - aiCars[i].spawnTime > AI_CARS_CONFIG.MAX_LIFETIME ? 'timeout' : 'too far'
+                })`);
+                despawnAICar(i);
+            }
+        }
+    }
+
+    // Spawn check
+    lastSpawnCheck += deltaTime;
+    if (lastSpawnCheck >= AI_CARS_CONFIG.SPAWN_CHECK_INTERVAL) {
+        lastSpawnCheck = 0;
+
+        // Try to spawn if under limit
+        if (aiCars.length < AI_CARS_CONFIG.MAX_AI_CARS) {
+            trySpawnAICar();
+        }
+    }
+
+    // Update each AI car
+    for (const aiCar of aiCars) {
+        updateAICar(aiCar, deltaTime);
+    }
 }
 
 // Debug function: Render small markers at node positions to verify connectivity
