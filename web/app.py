@@ -287,6 +287,107 @@ def teleport():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/random_locations', methods=['GET'])
+def random_locations():
+    """
+    Get two random valid locations from the road network.
+    Returns lat/lon coordinates and node IDs for start and end points
+    that are guaranteed to be on the road network and routable.
+    """
+    import random
+
+    if graph is None or nodes_dict is None:
+        return jsonify({'error': 'Graph data not loaded yet'}), 503
+
+    try:
+        # Get all node IDs from the graph
+        all_nodes = list(graph.nodes())
+
+        if len(all_nodes) < 2:
+            return jsonify({'error': 'Not enough nodes in graph'}), 500
+
+        # Filter for nodes that have at least one edge (connected nodes)
+        # This ensures the nodes are actually on driveable roads
+        connected_nodes = [n for n in all_nodes if graph.degree(n) >= 2]
+
+        if len(connected_nodes) < 2:
+            connected_nodes = all_nodes  # Fallback to all nodes
+
+        # Try to find two nodes that are reasonably far apart
+        # to create an interesting route
+        max_attempts = 50
+        min_distance = 500  # Minimum 500 meters apart
+
+        for _ in range(max_attempts):
+            # Pick two random nodes
+            start_node, end_node = random.sample(connected_nodes, 2)
+
+            # Get their coordinates
+            start_lat, start_lon = nodes_dict[start_node]
+            end_lat, end_lon = nodes_dict[end_node]
+
+            # Calculate approximate distance (haversine)
+            lat1, lon1 = math.radians(start_lat), math.radians(start_lon)
+            lat2, lon2 = math.radians(end_lat), math.radians(end_lon)
+            dlat = lat2 - lat1
+            dlon = lon2 - lon1
+            a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
+            c = 2 * math.asin(math.sqrt(a))
+            distance = 6371000 * c  # Earth radius in meters
+
+            # Check if route exists between these nodes
+            if distance >= min_distance:
+                # Verify route exists using networkx
+                try:
+                    if nx.has_path(graph, start_node, end_node):
+                        # Found a valid pair!
+                        return jsonify({
+                            'success': True,
+                            'start': {
+                                'node_id': start_node,
+                                'lat': start_lat,
+                                'lon': end_lon,
+                                'display_name': f'Location near ({start_lat:.5f}, {start_lon:.5f})'
+                            },
+                            'end': {
+                                'node_id': end_node,
+                                'lat': end_lat,
+                                'lon': end_lon,
+                                'display_name': f'Location near ({end_lat:.5f}, {end_lon:.5f})'
+                            },
+                            'estimated_distance': round(distance, 1)
+                        })
+                except nx.NetworkXError:
+                    continue
+
+        # If we couldn't find far-apart nodes, just return any two connected nodes
+        start_node, end_node = random.sample(connected_nodes, 2)
+        start_lat, start_lon = nodes_dict[start_node]
+        end_lat, end_lon = nodes_dict[end_node]
+
+        return jsonify({
+            'success': True,
+            'start': {
+                'node_id': start_node,
+                'lat': start_lat,
+                'lon': start_lon,
+                'display_name': f'Location near ({start_lat:.5f}, {start_lon:.5f})'
+            },
+            'end': {
+                'node_id': end_node,
+                'lat': end_lat,
+                'lon': end_lon,
+                'display_name': f'Location near ({end_lat:.5f}, {end_lon:.5f})'
+            },
+            'estimated_distance': None
+        })
+
+    except Exception as e:
+        print(f"Error in random_locations: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
 
 @app.route('/autocomplete', methods=['GET'])
 def autocomplete():
