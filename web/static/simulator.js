@@ -116,7 +116,7 @@ const autopilot = {
     brakingDistance: 50.0,     // m - INCREASED: start gradual decel when red and within this
     stopOffset: 3.0,           // m - INCREASED: stop further from intersection
     forwardSearchRadius: 100.0,  // m - INCREASED: look further ahead for lights
-    showWaypoints: true,        // Toggleable: show/hide waypoint markers (toggle with 'n' key when driving)
+    showWaypoints: false,       // Admin-only: waypoint markers hidden by default, toggle with 'n' in admin mode
     alignmentThreshold: 0.8,    // INCREASED: stricter alignment requirement (cos ~37°)
     stoppedAtIntersection: null, // when STOPPED at red: { intersectionPos, approachDir } so we don't drive off after overshoot
 
@@ -134,6 +134,10 @@ const autopilot = {
     debugScoring: false,       // Enable detailed score breakdown logging
     debugScoringVisuals: false // Enable visual debug indicators
 };
+
+// Admin mode (for teleport, debug, waypoint controls)
+const ADMIN_PASSWORD = '123456789';
+let adminMode = false;
 
 // Debug visuals for autopilot
 let routeLine = null;
@@ -533,8 +537,8 @@ window.addEventListener('keydown', (e) => {
         resetCarAndCamera();
     }
     
-    // Tab to toggle admin camera mode
-    if (key === 'tab') {
+    // Tab to toggle admin camera mode (only when admin password has been entered)
+    if (key === 'tab' && adminMode) {
         keys.tab = true;
         e.preventDefault();
         toggleAdminCamera();
@@ -578,8 +582,8 @@ window.addEventListener('keydown', (e) => {
         }
     }
 
-    // L to toggle traffic light scoring visuals (when autopilot is enabled)
-    if (key === 'l' && autopilot.enabled) {
+    // L to toggle traffic light scoring visuals (admin only, when autopilot is enabled)
+    if (key === 'l' && autopilot.enabled && adminMode) {
         e.preventDefault();
         autopilot.debugScoringVisuals = !autopilot.debugScoringVisuals;
         const checkbox = document.getElementById('debugScoringVisuals');
@@ -587,8 +591,8 @@ window.addEventListener('keydown', (e) => {
         console.log(`Traffic light scoring visuals: ${autopilot.debugScoringVisuals ? 'ON' : 'OFF'}`);
     }
 
-    // N to toggle waypoint markers (when autopilot is enabled)
-    if (key === 'n' && autopilot.enabled) {
+    // N to toggle waypoint markers (admin only, when autopilot is enabled)
+    if (key === 'n' && autopilot.enabled && adminMode) {
         e.preventDefault();
         autopilot.showWaypoints = !autopilot.showWaypoints;
         if (waypointMarkerGroup) waypointMarkerGroup.visible = autopilot.showWaypoints;
@@ -1252,6 +1256,15 @@ function setupTeleportUI() {
     }
     
     teleportBtn.addEventListener('click', () => {
+        // Admin gate: teleport is admin-only
+        if (!adminMode) {
+            const statusEl = document.getElementById('teleportStatus');
+            if (statusEl) {
+                statusEl.textContent = '✗ Admin mode required to use teleport';
+                statusEl.style.color = '#ff4444';
+            }
+            return;
+        }
         const address = addressInput?.value.trim() || null;
         const lat = latInput?.value ? parseFloat(latInput.value) : null;
         const lon = lonInput?.value ? parseFloat(lonInput.value) : null;
@@ -1303,14 +1316,24 @@ function setupDebugControls() {
         return;
     }
 
-    // Wire up console logging toggle
+    // Wire up console logging toggle (admin-only)
     consoleCheckbox.addEventListener('change', (e) => {
+        if (!adminMode) {
+            e.preventDefault();
+            consoleCheckbox.checked = autopilot.debugScoring;
+            return;
+        }
         autopilot.debugScoring = e.target.checked;
         console.log(`Traffic light scoring debug logging: ${e.target.checked ? 'ON' : 'OFF'}`);
     });
 
-    // Wire up visual debug toggle
+    // Wire up visual debug toggle (admin-only)
     visualsCheckbox.addEventListener('change', (e) => {
+        if (!adminMode) {
+            e.preventDefault();
+            visualsCheckbox.checked = autopilot.debugScoringVisuals;
+            return;
+        }
         autopilot.debugScoringVisuals = e.target.checked;
         console.log(`Traffic light scoring visuals: ${e.target.checked ? 'ON' : 'OFF'}`);
     });
@@ -1329,7 +1352,7 @@ if (document.readyState === 'loading') {
     setupDebugControls();
 }
 
-// Setup waypoint UI (show/hide checkbox) and wire change events
+// Setup waypoint UI (show/hide checkbox) and wire change events (admin-only)
 function setupWaypointUI() {
     const showCb = document.getElementById('showWaypoints');
     if (!showCb) {
@@ -1338,11 +1361,18 @@ function setupWaypointUI() {
         return;
     }
 
-    // Initialize state from autopilot settings
-    showCb.checked = !!autopilot.showWaypoints;
+    // Initialize state from autopilot settings (admin-only, default OFF)
+    autopilot.showWaypoints = false;
+    showCb.checked = false;
 
-    // Change handler to update autopilot flag and visual group
+    // Change handler to update autopilot flag and visual group (admin-only)
     showCb.addEventListener('change', (e) => {
+        if (!adminMode) {
+            // Non-admin: revert checkbox and ignore
+            e.preventDefault();
+            showCb.checked = !!autopilot.showWaypoints;
+            return;
+        }
         autopilot.showWaypoints = e.target.checked;
         if (waypointMarkerGroup) waypointMarkerGroup.visible = autopilot.showWaypoints;
         console.log(`Waypoint markers: ${autopilot.showWaypoints ? 'ON' : 'OFF'}`);
@@ -1358,17 +1388,79 @@ if (document.readyState === 'loading') {
     setupWaypointUI();
 }
 
-// Update admin status indicator in UI
-function updateAdminStatus(message) {
-    let statusEl = document.getElementById('adminStatus');
-    if (!statusEl) {
-        // Create status element if it doesn't exist
-        statusEl = document.createElement('div');
-        statusEl.id = 'adminStatus';
-        statusEl.style.cssText = 'position: absolute; top: 10px; right: 10px; background: rgba(0,0,0,0.7); color: #ffaa00; padding: 8px 12px; border-radius: 4px; font-family: monospace; font-size: 12px; z-index: 1000;';
-        document.body.appendChild(statusEl);
+// Simple admin login UI to gate manual controls (teleport, debug, waypoints)
+function setupAdminUI() {
+    const pwdInput = document.getElementById('adminPasswordInput');
+    const loginBtn = document.getElementById('adminLoginBtn');
+    const loginStatus = document.getElementById('adminLoginStatus');
+
+    if (!pwdInput || !loginBtn) {
+        // Retry if DOM not ready yet
+        setTimeout(setupAdminUI, 100);
+        return;
     }
-    statusEl.textContent = message;
+
+    function applyAdminVisibility() {
+        // Show/hide all admin-only UI elements
+        const adminEls = document.querySelectorAll('.admin-only');
+        adminEls.forEach(el => {
+            el.style.display = adminMode ? '' : 'none';
+        });
+
+        // Update button label based on mode
+        if (loginBtn) {
+            loginBtn.textContent = adminMode ? 'Lock' : 'Unlock';
+        }
+    }
+
+    loginBtn.addEventListener('click', () => {
+        // If already in admin mode, clicking the button locks (disables) admin mode
+        if (adminMode) {
+            adminMode = false;
+            if (loginStatus) {
+                loginStatus.textContent = 'Admin mode locked';
+                loginStatus.style.color = '#ffaa00';
+            }
+            applyAdminVisibility();
+            return;
+        }
+
+        // Otherwise, require correct password to enable admin mode
+        const value = pwdInput.value || '';
+        if (value === ADMIN_PASSWORD) {
+            adminMode = true;
+            pwdInput.value = '';
+            if (loginStatus) {
+                loginStatus.textContent = '✓ Admin mode enabled';
+                loginStatus.style.color = '#00ff7f';
+            }
+            applyAdminVisibility();
+        } else {
+            adminMode = false;
+            if (loginStatus) {
+                loginStatus.textContent = '✗ Incorrect password';
+                loginStatus.style.color = '#ff4444';
+            }
+            applyAdminVisibility();
+        }
+    });
+
+    // Allow Enter to submit password
+    pwdInput.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') {
+            loginBtn.click();
+        }
+    });
+
+    // Initial visibility
+    applyAdminVisibility();
+}
+
+// Setup admin UI when DOM is ready
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', setupAdminUI);
+} else {
+    setupAdminUI();
 }
 
 // Camera follow with smooth interpolation (normal mode)
@@ -1464,13 +1556,13 @@ function updateUI() {
             }
         }
 
-        // Show debug section when autopilot is active
+        // Show debug section when autopilot is active (admin-only)
         const debugSection = document.getElementById('debugSection');
         if (debugSection) {
-            debugSection.style.display = 'block';
+            debugSection.style.display = adminMode ? 'block' : 'none';
             // Update scoring info
             const scoringInfo = document.getElementById('scoringInfo');
-            if (scoringInfo && autopilot.activeLight && autopilot.activeLight.scoreBreakdown) {
+            if (adminMode && scoringInfo && autopilot.activeLight && autopilot.activeLight.scoreBreakdown) {
                 const sb = autopilot.activeLight.scoreBreakdown;
                 scoringInfo.textContent = `Score: ${sb.total.toFixed(0)} (prox:${sb.proximity.toFixed(0)} head:${sb.headingAlignment.toFixed(0)} ahead:${sb.directlyAhead.toFixed(0)} side:${sb.approachSide.toFixed(0)} path:${sb.pathMatching.toFixed(0)} face:${sb.lightFacing.toFixed(0)})`;
             } else if (scoringInfo) {
@@ -2848,6 +2940,12 @@ function updateAutopilot(deltaTime) {
     );
     autopilot.prevSteering = vehicle.steering;
     
+    // Stopped at light: freeze steering (no jitter), full brake, no creep. Until light == GREEN.
+    if (autopilot.drivingState === 'STOPPED') {
+        vehicle.steering = autopilot.prevSteering; // keep frozen
+        if (Math.abs(vehicle.velocity) < 0.05) vehicle.velocity = 0; // kill micro-oscillation
+    }
+
     // Step 4: Detect upcoming curvature
     const curvature = computePathCurvature();
     

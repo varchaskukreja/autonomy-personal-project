@@ -56,7 +56,15 @@
         <p><span class="key">T</span> Toggle Top-Down View</p>
         <p><span class="key">Arrows/WASD</span> Move Camera | <span class="key">Q/E</span> Up/Down</p>
         <p><span class="key">Shift</span> Fast Movement</p>
-        <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid rgba(255,255,255,0.2);">
+        <div id="adminLogin" style="margin-top: 15px; padding-top: 15px; border-top: 1px solid rgba(255,255,255,0.2);">
+            <p><strong>Admin Tools (locked)</strong></p>
+            <div style="display: flex; gap: 5px; margin-top: 5px; align-items: center;">
+                <input type="password" id="adminPasswordInput" placeholder="Enter admin password" style="width: 150px; padding: 5px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.3); color: white; border-radius: 3px;">
+                <button id="adminLoginBtn" style="padding: 6px 10px; background: #ffaa00; color: #000; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">Unlock</button>
+            </div>
+            <p id="adminLoginStatus" style="margin-top: 5px; font-size: 12px; color: #ffaa00;"></p>
+        </div>
+        <div id="adminTeleportSection" class="admin-only" style="margin-top: 15px; padding-top: 15px; border-top: 1px solid rgba(255,255,255,0.2); display: none;">
             <p><strong>📍 Teleport:</strong></p>
             <input type="text" id="teleportAddress" placeholder="Address (e.g., 123 Main St, Fremont, CA)" style="width: 250px; padding: 5px; margin-bottom: 5px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.3); color: white; border-radius: 3px;">
             <br>
@@ -72,13 +80,13 @@
         <p id="position">Position: (0, 0)</p>
         <p id="autopilotStatus" style="color: #888; display: none;"></p>
         <!-- Waypoint toggle: shows 'N' hotkey so user knows command -->
-        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin: 6px 0;">
+        <label class="admin-only" style="display: none; align-items: center; gap: 8px; cursor: pointer; margin: 6px 0;">
             <input type="checkbox" id="showWaypoints" style="width: 16px; height: 16px;">
             <span>Show Waypoints (<span class="key">N</span>)</span>
         </label>
         <p id="trafficLightStatus" style="color: #888; display: none;"></p>
         <p id="mapStatus" style="color: #ffaa00;">Loading Fremont map...</p>
-        <div id="debugSection" style="margin-top: 15px; padding-top: 15px; border-top: 1px solid rgba(255,255,255,0.2); display: none;">
+        <div id="debugSection" class="admin-only" style="margin-top: 15px; padding-top: 15px; border-top: 1px solid rgba(255,255,255,0.2); display: none;">
             <p><strong>Debug Options:</strong> <span class="key">L</span> Toggle Visuals</p>
             <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin: 5px 0;">
                 <input type="checkbox" id="debugScoringConsole" style="width: 16px; height: 16px;">
