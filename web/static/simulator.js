@@ -3111,8 +3111,8 @@ async function loadMapData() {
         renderRoads(mapData.roads);
         
         statusEl.textContent = "Rendering buildings...";
-        // Render buildings
-        renderBuildings(mapData.buildings);
+        // Render buildings (pass roads so buildings on main roads are culled)
+        renderBuildings(mapData.buildings, mapData.roads);
 
         // Remove building requested by developer (coordinate approx): (-82, -373.5)
         // Small tolerance used in meters
@@ -5240,9 +5240,35 @@ function renderDebugNodeMarkers(roads) {
     console.log(`Debug: Rendered ${nodeSet.size} unique node markers`);
 }
 
-// Render buildings as extrusions
+// Returns the shortest distance from point (px, pz) to the line segment (ax, az)-(bx, bz)
+function pointToSegmentDist(px, pz, ax, az, bx, bz) {
+    const dx = bx - ax, dz = bz - az;
+    const lenSq = dx * dx + dz * dz;
+    if (lenSq === 0) return Math.sqrt((px - ax) * (px - ax) + (pz - az) * (pz - az));
+    let t = ((px - ax) * dx + (pz - az) * dz) / lenSq;
+    t = Math.max(0, Math.min(1, t));
+    const closestX = ax + t * dx, closestZ = az + t * dz;
+    return Math.sqrt((px - closestX) * (px - closestX) + (pz - closestZ) * (pz - closestZ));
+}
+
+// Check whether any point in `points` is within `buffer` meters of any segment of the given main roads.
+// Returns true if the building overlaps a main road.
+function buildingOverlapsMainRoad(points, mainRoads, buffer) {
+    for (const road of mainRoads) {
+        const coords = road.coordinates;
+        for (let i = 0; i < coords.length - 1; i++) {
+            const ax = coords[i][0], az = coords[i][1];
+            const bx = coords[i + 1][0], bz = coords[i + 1][1];
+            for (const pt of points) {
+                if (pointToSegmentDist(pt[0], pt[1], ax, az, bx, bz) < buffer) return true;
+            }
+        }
+    }
+    return false;
+}
+
 // Render buildings as extrusions with realistic PBR materials
-function renderBuildings(buildings) {
+function renderBuildings(buildings, roads) {
     // Remove previous buildings group if present
     if (buildingsGroup) {
         while (buildingsGroup.children.length > 0) {
@@ -5300,10 +5326,18 @@ function renderBuildings(buildings) {
         })
     ];
     
+    // Pre-filter: group main roads by type with per-type buffer distances
+    const MAIN_ROAD_BUFFERS = { motorway: 18, trunk: 16, primary: 14, secondary: 12 };
+    const mainRoadsByType = {};
+    for (const type of Object.keys(MAIN_ROAD_BUFFERS)) {
+        mainRoadsByType[type] = (roads || []).filter(r => r.type === type);
+    }
+
     let buildingCount = 0;
+    let skippedCount = 0;
     buildings.forEach((building, index) => {
         if (building.coordinates.length < 3) return;
-        
+
         try {
             // Calculate building centroid for proper positioning
             let centroidX = 0, centroidZ = 0;
@@ -5313,7 +5347,21 @@ function renderBuildings(buildings) {
             }
             centroidX /= building.coordinates.length;
             centroidZ /= building.coordinates.length;
-            
+
+            // Skip buildings that overlap main roads — check centroid + all vertices
+            {
+                const testPoints = [[centroidX, centroidZ], ...building.coordinates];
+                let overlaps = false;
+                for (const roadType of Object.keys(MAIN_ROAD_BUFFERS)) {
+                    if (mainRoadsByType[roadType].length > 0 &&
+                        buildingOverlapsMainRoad(testPoints, mainRoadsByType[roadType], MAIN_ROAD_BUFFERS[roadType])) {
+                        overlaps = true;
+                        break;
+                    }
+                }
+                if (overlaps) { skippedCount++; return; }
+            }
+
             // Create building shape from coordinates relative to centroid
             const shape = new THREE.Shape();
             const firstPoint = building.coordinates[0];
@@ -5376,7 +5424,7 @@ function renderBuildings(buildings) {
     });
     
     scene.add(buildingGroup);
-    console.log(`✅ Rendered ${buildingCount} buildings with PBR materials and variation`);
+    console.log(`✅ Rendered ${buildingCount} buildings (${skippedCount} skipped – overlap with main roads)`);
 }
 
 /**
