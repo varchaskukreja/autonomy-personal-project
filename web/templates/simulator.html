@@ -71,6 +71,11 @@
         <p id="speed">Speed: 0.0 m/s</p>
         <p id="position">Position: (0, 0)</p>
         <p id="autopilotStatus" style="color: #888; display: none;"></p>
+        <!-- Waypoint toggle: shows 'N' hotkey so user knows command -->
+        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin: 6px 0;">
+            <input type="checkbox" id="showWaypoints" style="width: 16px; height: 16px;">
+            <span>Show Waypoints (<span class="key">N</span>)</span>
+        </label>
         <p id="trafficLightStatus" style="color: #888; display: none;"></p>
         <p id="mapStatus" style="color: #ffaa00;">Loading Fremont map...</p>
         <div id="debugSection" style="margin-top: 15px; padding-top: 15px; border-top: 1px solid rgba(255,255,255,0.2); display: none;">

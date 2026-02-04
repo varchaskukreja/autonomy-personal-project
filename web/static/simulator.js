@@ -114,8 +114,9 @@ const autopilot = {
     yellowDecision: null,      // null | 'STOP' | 'GO' (locked once set for current yellow)
     minStoppingDistance: 20.0,  // m - REDUCED: below this at yellow => commit to GO
     brakingDistance: 50.0,     // m - INCREASED: start gradual decel when red and within this
-    stopOffset: 6.0,           // m - INCREASED: stop further from intersection
+    stopOffset: 3.0,           // m - INCREASED: stop further from intersection
     forwardSearchRadius: 100.0,  // m - INCREASED: look further ahead for lights
+    showWaypoints: true,        // Toggleable: show/hide waypoint markers (toggle with 'n' key when driving)
     alignmentThreshold: 0.8,    // INCREASED: stricter alignment requirement (cos ~37°)
     stoppedAtIntersection: null, // when STOPPED at red: { intersectionPos, approachDir } so we don't drive off after overshoot
 
@@ -138,6 +139,7 @@ const autopilot = {
 let routeLine = null;
 let waypointMarker = null;
 let waypointMarkerGroup = null;
+let buildingsGroup = null; // Group containing building meshes for dynamic edits
 
 // Traffic light compliance debug visuals
 let stopPointMarker = null;
@@ -583,6 +585,16 @@ window.addEventListener('keydown', (e) => {
         const checkbox = document.getElementById('debugScoringVisuals');
         if (checkbox) checkbox.checked = autopilot.debugScoringVisuals;
         console.log(`Traffic light scoring visuals: ${autopilot.debugScoringVisuals ? 'ON' : 'OFF'}`);
+    }
+
+    // N to toggle waypoint markers (when autopilot is enabled)
+    if (key === 'n' && autopilot.enabled) {
+        e.preventDefault();
+        autopilot.showWaypoints = !autopilot.showWaypoints;
+        if (waypointMarkerGroup) waypointMarkerGroup.visible = autopilot.showWaypoints;
+        const cb = document.getElementById('showWaypoints');
+        if (cb) cb.checked = autopilot.showWaypoints;
+        console.log(`Waypoint markers: ${autopilot.showWaypoints ? 'ON' : 'OFF'}`);
     }
 });
 
@@ -1317,6 +1329,35 @@ if (document.readyState === 'loading') {
     setupDebugControls();
 }
 
+// Setup waypoint UI (show/hide checkbox) and wire change events
+function setupWaypointUI() {
+    const showCb = document.getElementById('showWaypoints');
+    if (!showCb) {
+        // Retry if DOM not ready yet
+        setTimeout(setupWaypointUI, 100);
+        return;
+    }
+
+    // Initialize state from autopilot settings
+    showCb.checked = !!autopilot.showWaypoints;
+
+    // Change handler to update autopilot flag and visual group
+    showCb.addEventListener('change', (e) => {
+        autopilot.showWaypoints = e.target.checked;
+        if (waypointMarkerGroup) waypointMarkerGroup.visible = autopilot.showWaypoints;
+        console.log(`Waypoint markers: ${autopilot.showWaypoints ? 'ON' : 'OFF'}`);
+    });
+
+    console.log('Waypoint UI initialized');
+}
+
+// Setup waypoint UI when DOM is ready
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', setupWaypointUI);
+} else {
+    setupWaypointUI();
+}
+
 // Update admin status indicator in UI
 function updateAdminStatus(message) {
     let statusEl = document.getElementById('adminStatus');
@@ -1480,6 +1521,11 @@ function renderRouteDebugVisuals() {
         waypointMarkerGroup.add(marker);
     });
     scene.add(waypointMarkerGroup);
+    // Respect showWaypoints flag
+    waypointMarkerGroup.visible = !!autopilot.showWaypoints;
+    // Sync checkbox UI if present
+    const showCb = document.getElementById('showWaypoints');
+    if (showCb) showCb.checked = !!autopilot.showWaypoints;
     
     console.log("Route debug visuals rendered");
 }
@@ -1487,6 +1533,10 @@ function renderRouteDebugVisuals() {
 // Update waypoint marker position to highlight current target
 function updateWaypointMarker() {
     if (!waypointMarkerGroup || !autopilot.enabled) return;
+
+    // Respect showWaypoints toggle
+    waypointMarkerGroup.visible = !!autopilot.showWaypoints;
+    if (!autopilot.showWaypoints) return;
     
     // Highlight current waypoint (make it larger and different color)
     waypointMarkerGroup.children.forEach((marker, index) => {
@@ -2957,6 +3007,10 @@ async function loadMapData() {
         statusEl.textContent = "Rendering buildings...";
         // Render buildings
         renderBuildings(mapData.buildings);
+
+        // Remove building requested by developer (coordinate approx): (-82, -373.5)
+        // Small tolerance used in meters
+        removeBuildingAtCoord(-82, -373.5, 0.6);
         
         // Traffic lights initialization
         statusEl.textContent = "Initializing traffic lights...";
@@ -4082,7 +4136,28 @@ function renderDebugNodeMarkers(roads) {
 // Render buildings as extrusions
 // Render buildings as extrusions with realistic PBR materials
 function renderBuildings(buildings) {
+    // Remove previous buildings group if present
+    if (buildingsGroup) {
+        while (buildingsGroup.children.length > 0) {
+            const old = buildingsGroup.children[0];
+            try {
+                if (old.geometry) old.geometry.dispose();
+                if (old.material) {
+                    if (Array.isArray(old.material)) old.material.forEach(m => m.dispose());
+                    else old.material.dispose();
+                }
+            } catch (e) {
+                console.warn('Error disposing old building mesh:', e);
+            }
+            buildingsGroup.remove(old);
+        }
+        try { scene.remove(buildingsGroup); } catch (e) { /* ignore */ }
+        buildingsGroup = null;
+    }
+
     const buildingGroup = new THREE.Group();
+    // Remember group so we can remove individual buildings later
+    buildingsGroup = buildingGroup;
     
     // Base building materials - neutral, realistic palette
     const buildingBaseMaterials = [
@@ -4182,6 +4257,9 @@ function renderBuildings(buildings) {
             mesh.position.set(centroidX, 0, centroidZ);
             mesh.castShadow = true;
             mesh.receiveShadow = true;
+            // Tag mesh with centroid and source index for later lookup/removal
+            mesh.userData.centroid = { x: centroidX, z: centroidZ };
+            mesh.userData.buildingIndex = index;
             
             buildingGroup.add(mesh);
             buildingCount++;
@@ -4192,6 +4270,62 @@ function renderBuildings(buildings) {
     
     scene.add(buildingGroup);
     console.log(`✅ Rendered ${buildingCount} buildings with PBR materials and variation`);
+}
+
+/**
+ * Remove any building whose centroid is within `tolerance` meters of (x, z).
+ * Also removes matching entry from mapData.buildings if mapData is available.
+ * Returns true if at least one building was removed.
+ */
+function removeBuildingAtCoord(x, z, tolerance = 50.0) {
+    if (!buildingsGroup) {
+        console.warn('No building group available (buildings not rendered yet)');
+        return false;
+    }
+    let removedAny = false;
+
+    for (let i = buildingsGroup.children.length - 1; i >= 0; i--) {
+        const mesh = buildingsGroup.children[i];
+        const c = mesh.userData && mesh.userData.centroid;
+        if (!c) continue;
+        const dx = c.x - x;
+        const dz = c.z - z;
+        if (Math.sqrt(dx * dx + dz * dz) <= tolerance) {
+            try {
+                if (mesh.geometry) mesh.geometry.dispose();
+                if (mesh.material) {
+                    if (Array.isArray(mesh.material)) mesh.material.forEach(m => m.dispose());
+                    else mesh.material.dispose();
+                }
+            } catch (e) {
+                console.warn('Error disposing building mesh:', e);
+            }
+            buildingsGroup.remove(mesh);
+            removedAny = true;
+        }
+    }
+
+    // If mapData is present, remove matching building entries by centroid
+    if (removedAny && mapData && Array.isArray(mapData.buildings)) {
+        for (let j = mapData.buildings.length - 1; j >= 0; j--) {
+            const b = mapData.buildings[j];
+            if (!b || !b.coordinates || b.coordinates.length === 0) continue;
+            let bx = 0, bz = 0;
+            for (const coord of b.coordinates) {
+                bx += coord[0]; bz += coord[1];
+            }
+            bx /= b.coordinates.length; bz /= b.coordinates.length;
+            const ddx = bx - x, ddz = bz - z;
+            if (Math.sqrt(ddx * ddx + ddz * ddz) <= tolerance) {
+                mapData.buildings.splice(j, 1);
+            }
+        }
+    }
+
+    if (removedAny) console.log(`Removed building(s) near (${x}, ${z}) with tolerance ${tolerance}`);
+    else console.warn(`No building found near (${x}, ${z}) within tolerance ${tolerance}`);
+
+    return removedAny;
 }
 
 // Start animation loop immediately (for vehicle controls)
