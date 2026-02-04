@@ -1,42 +1,113 @@
+Absolutely—I can create a fully updated README that merges your current version with all the missing details from your “info you want,” so nothing is left out. Here’s a comprehensive draft:
+
+---
+
 # Autonomous Routing & Simulation Platform (Fremont, CA)
 
-A comprehensive Flask-based web application for autonomous vehicle routing and 3D simulation using OpenStreetMap data, Dijkstra's algorithm, and Three.js for real-time visualization.
+A comprehensive Flask-based web application for autonomous vehicle routing and 3D simulation using OpenStreetMap data, Dijkstra's algorithm, and Three.js for real-time visualization. Features realistic traffic simulation with AI-controlled vehicles, traffic light systems, and collision avoidance.
+
+---
 
 ## Current Scope & Features
 
 ### 🗺️ Route Planning & Navigation
-- **Address Autocomplete**: Real-time address suggestions using Nominatim API
-- **Geocoding**: Automatic conversion from addresses to lat/lon coordinates
-- **KD-Tree Spatial Indexing**: Efficient O(log N) nearest node lookup for fast routing
-- **Dijkstra's Algorithm**: Custom implementation for shortest path routing with haversine distance weights
-- **Route Visualization**: Path summary with distance, node count, and coordinate polyline
+
+* **Address Autocomplete**: Real-time suggestions via Nominatim API
+* **Geocoding**: Convert addresses to lat/lon coordinates
+* **KD-Tree Spatial Indexing**: Efficient nearest node lookup (O(log N))
+* **Dijkstra's Algorithm**: Custom shortest-path routing with haversine distance
+* **Route Visualization**: Distance, node count, and coordinate polyline
+
+---
 
 ### 🎮 3D Simulator Environment
-- **Three.js WebGL Rendering**: Browser-based 3D visualization with smooth 60 FPS performance
-- **Real-World Map Data**: Fully rendered Fremont, CA road network and buildings from OSM data
-- **Scaled Road Rendering**: Realistic road widths (4m-12m) based on highway type
-- **Building Visualization**: Extruded building polygons with varied heights
-- **Dynamic Ground Plane**: Automatically sized based on map bounds
+
+* **Three.js WebGL Rendering**: Smooth 60 FPS browser-based visualization
+* **Real-World Map Data**: Fremont, CA roads & buildings from OSM
+* **Scaled Road Rendering**: Road widths 4–12m based on type
+* **Building Visualization**: Extruded polygons with varied heights
+* **Dynamic Ground Plane**: Automatically sized to map bounds
+* **Procedural Nebula Sky**: Animated stars and atmospheric clouds
+
+---
 
 ### 🚗 Vehicle Physics & Controls
-- **Bicycle Model Physics**: Realistic car dynamics with acceleration, braking, and steering
-- **Manual Driving Controls**: WASD keys for acceleration, braking, and steering
-- **SlowRoads.io-Style Animations**: Smooth vehicle tilting on curves and realistic wheel turning
-- **Speed-Based Turning**: Automatic speed reduction during sharp turns for realism
-- **Steering Constraints**: Maximum angular velocity and minimum turning radius limits
 
-### 📹 Admin Camera System
-- **Free Camera Movement**: Admin mode for inspection and debugging
-- **X-Y-Z Navigation**: Arrow keys/WASD for movement, Q/E for vertical movement
-- **Top-Down View**: Toggle-able aerial perspective for map inspection
-- **Fast Movement Mode**: Shift key for 3x speed camera movement
-- **Camera Reset**: Spacebar resets both vehicle and camera to initial positions
+* **Bicycle Model Physics**: Realistic acceleration, braking, and steering dynamics
+* **Manual Driving Controls**: WASD keys for movement
+* **SlowRoads.io-Style Animations**: Tilting and wheel rotation on curves
+* **Speed-Based Turning**: Automatic speed reduction on sharp turns
+* **Steering Constraints**: Angular velocity & minimum turning radius limits
+* **Teleportation System**: Jump to any address or coordinates
 
-### 🏗️ Architecture
-- **Modular Core Library**: Separate modules for graph building, routing, and spatial indexing
-- **Flask REST API**: Clean separation between backend routing logic and frontend visualization
-- **Efficient Data Structures**: NetworkX graphs, SciPy KD-trees, and optimized coordinate transformations
-- **OSM Data Processing**: Custom handler for extracting roads and buildings with filtering support
+---
+
+### 🤖 Autopilot System
+
+* **Pure Pursuit Steering**: Lookahead-based path following
+* **Waypoint Navigation**: Automatic route traversal
+* **Curvature-Based Speed Control**: Adjust speed based on path curvature
+* **Steering Oscillation Damping**: Prevents zigzag behavior
+* **Route Integration**: Connects route planner directly to autopilot
+
+---
+
+### 🚦 Traffic Light System
+
+* **Automatic Intersection Detection**: Identifies intersections from road network
+* **Multi-Phase Signal Timing**: NS/EW straight & left-turn phases
+* **Signal State Machine**: GREEN → YELLOW → RED cycling
+* **Left-Turn Arrows**: Dedicated left-turn signals
+* **Traffic Light Compliance**: Vehicles detect and obey lights
+
+  * Approach detection with scoring
+  * Yellow light logic (stop vs. proceed)
+  * Smooth deceleration curves
+
+---
+
+### 🚙 AI Traffic System
+
+* **Autonomous AI Vehicles**: Up to 8 AI cars sharing the road
+* **Relevance-Based Spawning**: AI spawns near ego on main roads
+* **Local Path Planning**: AI follows roads and decides turns at intersections
+* **Intersection Branching**: Weighted random decisions (50% straight, 30% right, 20% left)
+* **Traffic Light Obedience**: AI respects traffic signals
+* **Lifecycle Management**: AI despawns when out of camera range, path completed, or lifetime exceeded
+
+---
+
+### 🚧 Collision Avoidance System
+
+* **Forward Detection Cone**: 50m range, 60° angle
+* **Safe Following Distance**: 12m minimum
+* **Emergency Braking**: Aggressive braking < 6m
+* **Gradual Slowdown**: Proportional to distance
+* **Multi-Vehicle Awareness**: Ego and AI vehicles avoid collisions
+* **Approach Detection**: Tracks relative velocity
+
+---
+
+### 📹 Camera Systems
+
+* **Follow Camera**: Smooth third-person tracking
+* **Admin Camera Mode**: Free movement for debugging
+
+  * WASD/Arrow keys + Q/E for X-Y-Z movement
+  * Shift for fast movement
+  * Top-down view toggle
+  * Spacebar resets vehicle & camera
+
+---
+
+### 🛠️ Debug & Development Tools
+
+* Traffic light scoring visuals
+* Waypoint markers toggle
+* Spawn location markers
+* Console logging for AI & traffic decisions
+
+---
 
 ## Setup
 
@@ -46,212 +117,129 @@ A comprehensive Flask-based web application for autonomous vehicle routing and 3
 pip install -r requirements.txt
 ```
 
-Or install individually:
+Or individually:
+
 ```bash
 pip install Flask requests scipy networkx numpy matplotlib osmium
 ```
 
 ### 2. Ensure OSM Data File
 
-Make sure `fremont_raw.osm` is in `data/osm/` directory. The OSM file should contain Fremont, CA map data with highway ways and building polygons.
+Place `fremont_raw.osm` in `data/osm/`. Download options:
 
-**Note**: If you don't have the OSM file, you can download it from:
-- [OpenStreetMap](https://www.openstreetmap.org/) - Export area covering Fremont, CA
-- [Geofabrik](https://download.geofabrik.de/north-america/us/california.html) - California extracts
+* [OpenStreetMap](https://www.openstreetmap.org/)
+* [Geofabrik California Extracts](https://download.geofabrik.de/north-america/us/california.html)
 
 ### 3. Run the Application
 
-From the project root directory:
-
 ```bash
 python3 -m web.app
-```
-
-Or:
-
-```bash
+# or
 cd web
 python3 app.py
 ```
 
-The server will:
-- Load and parse the OSM graph data (30-60 seconds on first startup)
-- Build the NetworkX directed graph with haversine edge weights
-- Build the KD-tree spatial index for nearest node lookup
-- Extract map data for 3D rendering (roads and buildings)
-- Start Flask server on `http://127.0.0.1:5000`
+Server startup includes:
 
-You should see console output like:
-```
-Loading OSM data and building graph...
-Building KD-tree from graph nodes only...
-Extracting map data for 3D rendering...
-✅ Graph loaded: X nodes, Y edges
-✅ KD-tree built: Z nodes indexed
-✅ Map data cached: A road segments, B buildings
-```
+* Loading & parsing OSM graph (30–60s first time)
+* Building NetworkX graph & KD-tree
+* Extracting 3D map data
+* Flask server at `http://127.0.0.1:5000`
 
 ### 4. Open in Browser
 
-Navigate to: `http://127.0.0.1:5000`
+Navigate to `http://127.0.0.1:5000`
+
+---
 
 ## Usage
 
-### Route Planning (Main Page)
-1. Navigate to `http://127.0.0.1:5000`
-2. Enter a start address in Fremont, CA
-3. Enter an end address in Fremont, CA
-4. Use autocomplete suggestions as you type
-5. Click "Compute Route" to find the shortest path
-6. View route summary with distance and node count
+### Route Planning
+
+1. Enter start/end addresses in Fremont, CA
+2. Select autocomplete suggestions
+3. Click "Compute Route" for shortest path
+4. Click "Drive Route" to open simulator with autopilot
 
 ### 3D Simulator
-1. Navigate to `http://127.0.0.1:5000/simulator`
-2. **Manual Driving Controls**:
-   - `W` - Accelerate
-   - `S` - Brake/Reverse
-   - `A` - Steer Left
-   - `D` - Steer Right
-   - `Space` - Reset vehicle position
-3. **Admin Camera Mode** (Press `Tab` to toggle):
-   - `Arrow Keys` / `WASD` - Move camera
-   - `Q` / `E` - Move camera up/down
-   - `Shift` - Fast movement (3x speed)
-   - `T` - Toggle top-down view
-   - `Space` - Reset camera and vehicle
-   - `Tab` - Exit admin mode
+
+* **Manual Driving**: W/A/S/D for movement, Space to reset
+* **Admin Camera Mode (Tab)**:
+
+  * WASD/Arrow keys + Q/E for movement
+  * Shift for fast movement
+  * T for top-down view
+  * Space resets vehicle & camera
+
+### Teleportation
+
+Jump to addresses or lat/lon coordinates, optional heading.
+
+---
 
 ## API Endpoints
 
-### Route Planning
-- `GET /` - Route planning interface
-- `GET /autocomplete?q=<query>` - Address autocomplete suggestions
-- `POST /get_latlon` - Convert addresses to coordinates and find nearest nodes
-- `POST /compute_route` - Compute shortest path using Dijkstra's algorithm
+| Endpoint         | Method | Description                      |
+| ---------------- | ------ | -------------------------------- |
+| /                | GET    | Route planning UI                |
+| /autocomplete?q= | GET    | Address suggestions              |
+| /get_latlon      | POST   | Convert addresses to coordinates |
+| /compute_route   | POST   | Dijkstra shortest path           |
+| /simulator       | GET    | 3D simulator interface           |
+| /api/map_data    | GET    | Roads & buildings JSON           |
+| /api/teleport    | POST   | Teleport vehicle                 |
 
-### Simulator
-- `GET /simulator` - 3D simulator interface
-- `GET /api/map_data` - Get transformed map data (roads and buildings) for rendering
+---
 
 ## Project Structure
 
 ```
 .
-├── core/                              # Core routing & data processing modules
-│   ├── __init__.py
-│   ├── graph_builder.py              # OSM parsing, graph construction, map extraction
-│   ├── routing.py                    # Custom Dijkstra's algorithm implementation
-│   └── spatial_index.py              # KD-tree spatial indexing for nearest node lookup
-├── web/                               # Flask web application
-│   ├── __init__.py
-│   ├── app.py                        # Flask server with routing endpoints
-│   ├── templates/
-│   │   ├── index.html                # Route planning UI
-│   │   └── simulator.html            # 3D simulator interface
-│   └── static/
-│       ├── style.css                 # Styling
-│       ├── app.js                    # Route planning frontend
-│       └── simulator.js              # 3D simulator with physics and controls
-├── data/
-│   └── osm/
-│       ├── fremont_raw.osm           # Raw OSM data file
-│       └── fremont.osm               # Processed OSM data (if applicable)
-├── legacy/                            # Legacy scripts (for reference)
-│   └── visualize_fremont.py          # Matplotlib visualization script
+├── core/                 # Routing & processing modules
+├── web/                  # Flask app & static files
+├── data/osm/             # OSM data
+├── legacy/               # Legacy scripts
 ├── README.md
-└── requirements.txt                   # Python dependencies
+└── requirements.txt
 ```
+
+---
 
 ## Technical Details
 
-### Graph Construction
-- **Graph Type**: NetworkX Directed Graph (DiGraph) to support oneway streets
-- **Edge Weights**: Haversine distance in meters between consecutive nodes
-- **Highway Filtering**: Supports all vehicular highway types (motorway, primary, residential, etc.)
-- **Oneway Handling**: Respects `oneway=yes` and `oneway=-1` tags for directional edges
+* **Graph**: NetworkX DiGraph, haversine edge weights
+* **OSM → Simulator Coordinates**: Local Cartesian projection
+* **AI Cars Config**: Max 8, spawn near ego, collision & despawn logic
+* **Traffic Light Timings**: Straight Green 10s, Left Green 5s, Yellow 2s
+* **Optimizations**: Graph & KD-tree caching, batched rendering, spatial filtering for AI collision
 
-### Coordinate Systems
-- **OSM Format**: Latitude/Longitude (WGS84)
-- **Simulator Format**: Local Cartesian coordinates (meters) centered at map center
-- **Transformation**: Uses haversine formula with Earth radius for accurate local projection
+---
 
-### Performance Optimizations
-- Graph and KD-tree loaded once on server startup (30-60 seconds initial load)
-- Map data cached and served as JSON for frontend rendering
-- Batched road rendering by type for efficient GPU rendering
-- Smooth camera interpolation with lerp-based movement
+## Browser Requirements
 
-### Browser Requirements
-- Modern browser with WebGL support (Chrome, Firefox, Safari, Edge)
-- ES6 modules support required for Three.js
-- Recommended: 4GB+ RAM for smooth rendering of large maps
+* WebGL-enabled modern browser (Chrome, Firefox, Safari, Edge)
+* ES6 modules
+* ≥4GB RAM recommended
 
-## Troubleshooting
-
-**Import errors**: Make sure all dependencies are installed and you're running from the project root
-```bash
-pip install -r requirements.txt
-```
-
-**Graph loading slow**: First startup loads the entire OSM file (may take 30-60 seconds). This is normal.
-
-**No autocomplete**: Check internet connection (requires Nominatim API). Rate limit: 1 request per second.
-
-**Route not found**: Ensure addresses are within the Fremont area covered by the OSM data.
-
-**Simulator not loading**: Check browser console for errors. Ensure WebGL is enabled in browser settings.
-
-**Poor performance**: Reduce browser zoom level or disable hardware acceleration. Map rendering is optimized but may be slow on older hardware.
-
-## Future Steps: Autonomous Vehicle Integration
-
-### Phase 1: Path Following (Next Steps)
-- [ ] **Route Integration**: Connect computed routes from Dijkstra to simulator
-- [ ] **Path Visualization**: Display computed route as 3D path in simulator
-- [ ] **Waypoint Navigation**: Vehicle follows waypoint sequence from route
-- [ ] **PID Controller**: Implement steering and speed control for path following
-
-### Phase 2: Localization & Perception
-- [ ] **GPS Simulation**: Add simulated GPS with noise for position estimation
-- [ ] **Sensor Models**: Implement IMU, wheel odometry, and LiDAR point cloud simulation
-- [ ] **Localization Pipeline**: Kalman filter or particle filter for pose estimation
-- [ ] **Map Matching**: Align vehicle position with road network
-
-### Phase 3: Obstacle Avoidance
-- [ ] **Dynamic Obstacles**: Add moving objects (other vehicles, pedestrians)
-- [ ] **Collision Detection**: AABB/sphere-based collision detection with obstacles
-- [ ] **Path Replanning**: Dynamic path adjustment when obstacles detected
-- [ ] **Safety Buffer**: Maintain safe distance from obstacles
-
-### Phase 4: Advanced Planning
-- [ ] **Behavioral Planning**: Lane changes, merging, intersection handling
-- [ ] **Traffic Rules**: Stop signs, traffic lights, right-of-way logic
-- [ ] **Multi-Agent Simulation**: Multiple autonomous vehicles in shared environment
-- [ ] **Decision Trees**: Rule-based behavior for common driving scenarios
-
-### Phase 5: Learning-Based Approaches
-- [ ] **Imitation Learning**: Train on expert driving demonstrations
-- [ ] **Reinforcement Learning**: Reward-based learning for optimal policies
-- [ ] **Neural Network Controllers**: End-to-end learning for steering/acceleration
-- [ ] **Behavioral Cloning**: Clone human driver behavior from simulator data
-
-### Phase 6: Real-World Integration
-- [ ] **CARLA Integration**: Connect to CARLA simulator for more realistic physics
-- [ ] **ROS Bridge**: ROS nodes for sensor data and control commands
-- [ ] **Hardware-in-the-Loop**: Connect to real vehicle sensors/actuators
-- [ ] **Field Testing**: Deploy on physical vehicle with safety systems
+---
 
 ## Contributing
 
-This is a research/educational project. Contributions, suggestions, and feedback are welcome!
+Research/educational project. Feedback, suggestions, and contributions welcome.
+
+---
 
 ## License
 
-[Specify your license here]
+[Specify license here]
+
+---
 
 ## Acknowledgments
 
-- OpenStreetMap contributors for Fremont, CA map data
-- Nominatim API for geocoding and address autocomplete
-- Three.js community for excellent 3D rendering library
-- NetworkX and SciPy for efficient graph and spatial data structures
+* OpenStreetMap contributors
+* Nominatim API
+* Three.js community
+* NetworkX & SciPy libraries
+
+---
