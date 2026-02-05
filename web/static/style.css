@@ -270,6 +270,10 @@ body.sim-running {
     z-index: 200;
 }
 
+.arrival-overlay.hidden {
+    display: none;
+}
+
 .arrival-card {
     background: rgba(0, 0, 0, 0.85);
     color: #ffffff;

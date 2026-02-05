@@ -13,7 +13,6 @@ const landingView = document.getElementById('landingView');
 const simulatorRoot = document.getElementById('simulatorRoot');
 const arrivalOverlay = document.getElementById('arrivalOverlay');
 const exitJourneyBtn = document.getElementById('exitJourneyBtn');
-const newRouteBtn = document.getElementById('newRouteBtn');
 const simulatorContainer = document.getElementById('container');
 
 function setState(nextState) {
@@ -34,21 +33,12 @@ function exitSimulation() {
     setState(AppState.LANDING);
 }
 
-function restartSimulation() {
-    simulator.stop();
-    setState(AppState.RUNNING);
-    simulator.start({ container: simulatorContainer });
-}
-
 simulator.on('destinationReached', () => {
     setState(AppState.ARRIVED);
 });
 
 if (exitJourneyBtn) {
     exitJourneyBtn.addEventListener('click', exitSimulation);
-}
-if (newRouteBtn) {
-    newRouteBtn.addEventListener('click', restartSimulation);
 }
 
 setState(AppState.LANDING);
@@ -243,46 +233,12 @@ document.getElementById('routeForm').addEventListener('submit', async function(e
 
 function displayResults(latlonData, routeData) {
     const resultsDiv = document.getElementById('results');
-    const summaryDiv = document.getElementById('routeSummary');
-    const detailsDiv = document.getElementById('routeDetails');
     const statusDiv = document.getElementById('statusMessage');
-
-    // Build summary
-    summaryDiv.innerHTML = `
-        <div class="route-summary-item">
-            <strong>Start:</strong> ${latlonData.start.address}
-        </div>
-        <div class="route-summary-item">
-            <strong>End:</strong> ${latlonData.end.address}
-        </div>
-        <div class="route-summary-item">
-            <strong>Path Nodes:</strong> ${routeData.num_nodes}
-        </div>
-        <div class="route-summary-item">
-            <strong>Total Distance:</strong> ${routeData.distance_km.toFixed(2)} km (${routeData.distance.toFixed(0)} meters)
-        </div>
-        <div class="route-summary-item">
-            <strong>Start Node ID:</strong> ${latlonData.start.node_id}
-        </div>
-        <div class="route-summary-item">
-            <strong>End Node ID:</strong> ${latlonData.end.node_id}
-        </div>
-    `;
-
-    // Build details
-    detailsDiv.innerHTML = `
-        <h3>Route Coordinates</h3>
-        <p>Path contains ${routeData.coordinates.length} coordinate points</p>
-        <details>
-            <summary>View all coordinates (${routeData.coordinates.length} points)</summary>
-            <pre style="max-height: 300px; overflow-y: auto; background: #f5f5f5; padding: 10px; border-radius: 4px; margin-top: 10px;">${JSON.stringify(routeData.coordinates, null, 2)}</pre>
-        </details>
-    `;
 
     // Status message with simulator launch button
     statusDiv.innerHTML = `
         <strong>✅ Route computed successfully!</strong><br>
-        The path contains ${routeData.num_nodes} nodes covering ${routeData.distance_km.toFixed(2)} km.<br><br>
+        Ready to launch the simulator.<br><br>
         <button id="launchSimulatorBtn" class="btn-primary" style="margin-top: 10px;">
             🚗 Launch Simulator & Start Autopilot
         </button>
