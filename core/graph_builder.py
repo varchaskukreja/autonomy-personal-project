@@ -296,7 +296,6 @@ def transform_map_data_for_rendering(map_data: Dict, center_lat: float, center_l
             
             # Skip this building if it's near the problematic position
             if distance < REMOVAL_RADIUS:
-                print(f"Removing building at ({centroid_x:.1f}, {centroid_z:.1f}) - distance: {distance:.1f}m")
                 continue
         
         transformed_buildings.append({
@@ -526,4 +525,3 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Error during routing test: {e}")
         visualize_graph(graph, nodes_dict)
-

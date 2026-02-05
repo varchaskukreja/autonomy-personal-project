@@ -34,23 +34,16 @@ def load_graph_data():
     """Load graph and build KD-tree on server startup."""
     global graph, nodes_dict, kd_tree, node_ids_list, map_data_cache, map_center_lat, map_center_lon
     
-    print("Loading OSM data and building graph...")
     # Get path to OSM file relative to project root
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     osm_path = os.path.join(project_root, "data", "osm", "fremont_raw.osm")
     graph, nodes_dict = build_graph(osm_path)
     
-    print("Building KD-tree from graph nodes only...")
     # Only include nodes that are actually in the graph (part of highway ways)
     graph_nodes_dict = {node_id: nodes_dict[node_id] for node_id in graph.nodes() if node_id in nodes_dict}
     kd_tree, node_ids_list, _ = build_kd_tree(graph_nodes_dict)
     
-    print(f"✅ Graph loaded: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
-    print(f"✅ KD-tree built: {len(node_ids_list)} nodes indexed (only graph nodes)")
-    
     # Extract map data for 3D rendering (uses existing RoadGraphHandler from graph_builder.py)
-    print("Extracting map data for 3D rendering...")
-    
     # Use existing RoadGraphHandler - same tested code that built the graph!
     map_data = extract_map_data_for_rendering(osm_path)
     
@@ -70,88 +63,6 @@ def load_graph_data():
     
     # Transform to local coordinates
     map_data_cache = transform_map_data_for_rendering(map_data, center_lat, center_lon)
-    print(f"✅ Map data cached: {len(map_data_cache['roads'])} road segments, {len(map_data_cache['buildings'])} buildings")
-    print(f"✅ Map center: ({map_center_lat:.6f}, {map_center_lon:.6f})")
-    
-    # Analyze coordinate overlap for debugging (called after map_data_cache is set)
-    analyze_coordinate_overlap()
-
-
-def analyze_coordinate_overlap():
-    """Analyze if roads and buildings actually overlap in coordinate space."""
-    global map_data_cache
-    
-    if map_data_cache is None:
-        print("⚠️  Cannot analyze coordinate overlap: map_data_cache is not loaded yet")
-        return
-    
-    print("\n" + "="*60)
-    print("COMPREHENSIVE COORDINATE ANALYSIS")
-    print("="*60)
-    
-    # Get all road coordinates
-    road_xs = []
-    road_zs = []
-    for road in map_data_cache['roads']:
-        for coord in road['coordinates']:
-            road_xs.append(coord[0])
-            road_zs.append(coord[1])
-    
-    # Get all building coordinates
-    building_xs = []
-    building_zs = []
-    for building in map_data_cache['buildings']:
-        for coord in building['coordinates']:
-            building_xs.append(coord[0])
-            building_zs.append(coord[1])
-    
-    print(f"\nROADS ({len(map_data_cache['roads'])} total):")
-    print(f"  X range: [{min(road_xs):.1f}, {max(road_xs):.1f}]")
-    print(f"  Z range: [{min(road_zs):.1f}, {max(road_zs):.1f}]")
-    print(f"  Total points: {len(road_xs)}")
-    
-    print(f"\nBUILDINGS ({len(map_data_cache['buildings'])} total):")
-    print(f"  X range: [{min(building_xs):.1f}, {max(building_xs):.1f}]")
-    print(f"  Z range: [{min(building_zs):.1f}, {max(building_zs):.1f}]")
-    print(f"  Total points: {len(building_xs)}")
-    
-    # Check for overlap
-    road_x_min, road_x_max = min(road_xs), max(road_xs)
-    road_z_min, road_z_max = min(road_zs), max(road_zs)
-    building_x_min, building_x_max = min(building_xs), max(building_xs)
-    building_z_min, building_z_max = min(building_zs), max(building_zs)
-    
-    x_overlap = not (building_x_max < road_x_min or building_x_min > road_x_max)
-    z_overlap = not (building_z_max < road_z_min or building_z_min > road_z_max)
-    
-    print(f"\nOVERLAP CHECK:")
-    print(f"  X overlap: {x_overlap}")
-    print(f"  Z overlap: {z_overlap}")
-    print(f"  Both overlap: {x_overlap and z_overlap}")
-    
-    if x_overlap and z_overlap:
-        print("\n✅ Roads and buildings DO overlap - they're in the same area")
-        print("   This is expected for a city map!")
-    else:
-        print("\n❌ ERROR: Roads and buildings DON'T overlap!")
-        print("   They're in completely different coordinate spaces!")
-        print("   This explains why buildings appear 'on roads' - they're actually")
-        print("   far apart but rendering in the wrong place.")
-    
-    # Sample some buildings in different parts of the list
-    print(f"\nSAMPLE BUILDING LOCATIONS (checking distribution):")
-    sample_indices = [0, len(map_data_cache['buildings'])//4, 
-                     len(map_data_cache['buildings'])//2,
-                     3*len(map_data_cache['buildings'])//4,
-                     len(map_data_cache['buildings'])-1]
-    
-    for idx in sample_indices:
-        if idx < len(map_data_cache['buildings']):
-            building = map_data_cache['buildings'][idx]
-            first_coord = building['coordinates'][0]
-            print(f"  Building {idx}: X={first_coord[0]:.1f}, Z={first_coord[1]:.1f}")
-    
-    print("="*60 + "\n")
 
 @app.route('/')
 def index():
@@ -281,9 +192,6 @@ def teleport():
         })
     
     except Exception as e:
-        print(f"Error in teleport: {e}")
-        import traceback
-        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 
@@ -383,9 +291,6 @@ def random_locations():
         })
 
     except Exception as e:
-        print(f"Error in random_locations: {e}")
-        import traceback
-        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 
@@ -434,10 +339,8 @@ def autocomplete():
         return jsonify(suggestions)
     
     except requests.RequestException as e:
-        print(f"Error in autocomplete: {e}")
         return jsonify({'error': str(e)}), 500
     except Exception as e:
-        print(f"Unexpected error in autocomplete: {e}")
         return jsonify({'error': str(e)}), 500
 
 
@@ -521,9 +424,6 @@ def get_latlon():
         })
     
     except Exception as e:
-        print(f"Error in get_latlon: {e}")
-        import traceback
-        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 
@@ -569,9 +469,6 @@ def compute_route():
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
     except Exception as e:
-        print(f"Error in compute_route: {e}")
-        import traceback
-        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 
@@ -587,4 +484,3 @@ if __name__ == '__main__':
     print("="*50 + "\n")
     
     app.run(debug=True, host='0.0.0.0', port=5000)
-
