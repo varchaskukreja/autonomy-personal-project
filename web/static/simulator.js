@@ -1,5 +1,87 @@
 import * as THREE from 'three';
 
+export class Simulator {
+    constructor() {
+        this._runtime = null;
+        this._listeners = new Map();
+    }
+
+    on(event, handler) {
+        if (!this._listeners.has(event)) {
+            this._listeners.set(event, new Set());
+        }
+        this._listeners.get(event).add(handler);
+        return () => this.off(event, handler);
+    }
+
+    off(event, handler) {
+        const set = this._listeners.get(event);
+        if (!set) return;
+        set.delete(handler);
+        if (set.size === 0) {
+            this._listeners.delete(event);
+        }
+    }
+
+    start(config = {}) {
+        if (this._runtime) {
+            this.stop();
+        }
+        this._runtime = createSimulatorRuntime(config, this._emit.bind(this));
+    }
+
+    stop() {
+        if (!this._runtime) return;
+        this._runtime.stop();
+        this._runtime = null;
+    }
+
+    _emit(event, payload) {
+        const set = this._listeners.get(event);
+        if (!set || set.size === 0) return;
+        for (const handler of set) {
+            try {
+                handler(payload);
+            } catch (error) {
+                console.error(`Simulator event handler error (${event}):`, error);
+            }
+        }
+    }
+}
+
+function createSimulatorRuntime(config = {}, emit) {
+const containerEl = config?.container ?? document.getElementById('container');
+if (!containerEl) {
+    throw new Error('Simulator container element not found');
+}
+containerEl.innerHTML = '';
+
+const cleanup = {
+    disposers: [],
+    timeouts: [],
+    rafId: null,
+    stopped: false
+};
+
+function listen(target, type, handler, options) {
+    if (!target || !target.addEventListener) return;
+    target.addEventListener(type, handler, options);
+    cleanup.disposers.push(() => {
+        try {
+            target.removeEventListener(type, handler, options);
+        } catch (error) {
+            // ignore
+        }
+    });
+}
+
+function trackTimeout(id) {
+    cleanup.timeouts.push(id);
+    return id;
+}
+
+let destinationEmitted = false;
+
 // Scene setup
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0a0015); // Dark purple background
@@ -16,7 +98,7 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-document.getElementById('container').appendChild(renderer.domElement);
+containerEl.appendChild(renderer.domElement);
 
 // Map data
 let mapData = null;
@@ -520,7 +602,7 @@ const keys = {
     tab: false
 };
 
-window.addEventListener('keydown', (e) => {
+listen(window, 'keydown', (e) => {
     const key = e.key.toLowerCase();
     const code = e.code;
     
@@ -604,7 +686,7 @@ window.addEventListener('keydown', (e) => {
     }
 });
 
-window.addEventListener('keyup', (e) => {
+listen(window, 'keyup', (e) => {
     const key = e.key.toLowerCase();
     const code = e.code;
     
@@ -644,7 +726,7 @@ window.addEventListener('keyup', (e) => {
 });
 
 // Handle window resize
-window.addEventListener('resize', () => {
+listen(window, 'resize', () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
@@ -1253,11 +1335,11 @@ function setupTeleportUI() {
     
     if (!teleportBtn) {
         // Retry if DOM not ready yet
-        setTimeout(setupTeleportUI, 100);
+        trackTimeout(setTimeout(setupTeleportUI, 100));
         return;
     }
     
-    teleportBtn.addEventListener('click', () => {
+    listen(teleportBtn, 'click', () => {
         // Admin gate: teleport is admin-only
         if (!adminMode) {
             const statusEl = document.getElementById('teleportStatus');
@@ -1289,7 +1371,7 @@ function setupTeleportUI() {
     // Allow Enter key to trigger teleportation
     [addressInput, latInput, lonInput, yawInput].forEach(input => {
         if (input) {
-            input.addEventListener('keypress', (e) => {
+            listen(input, 'keypress', (e) => {
                 if (e.key === 'Enter') {
                     teleportBtn.click();
                 }
@@ -1300,7 +1382,7 @@ function setupTeleportUI() {
 
 // Setup teleport UI when DOM is ready
 if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', setupTeleportUI);
+    listen(document, 'DOMContentLoaded', setupTeleportUI);
 } else {
     setupTeleportUI();
 }
@@ -1314,12 +1396,12 @@ function setupDebugControls() {
 
     if (!debugSection || !consoleCheckbox || !visualsCheckbox) {
         // Retry if DOM not ready
-        setTimeout(setupDebugControls, 100);
+        trackTimeout(setTimeout(setupDebugControls, 100));
         return;
     }
 
     // Wire up console logging toggle (admin-only)
-    consoleCheckbox.addEventListener('change', (e) => {
+    listen(consoleCheckbox, 'change', (e) => {
         if (!adminMode) {
             e.preventDefault();
             consoleCheckbox.checked = autopilot.debugScoring;
@@ -1330,7 +1412,7 @@ function setupDebugControls() {
     });
 
     // Wire up visual debug toggle (admin-only)
-    visualsCheckbox.addEventListener('change', (e) => {
+    listen(visualsCheckbox, 'change', (e) => {
         if (!adminMode) {
             e.preventDefault();
             visualsCheckbox.checked = autopilot.debugScoringVisuals;
@@ -1349,7 +1431,7 @@ function setupDebugControls() {
 
 // Setup debug controls when DOM is ready
 if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', setupDebugControls);
+    listen(document, 'DOMContentLoaded', setupDebugControls);
 } else {
     setupDebugControls();
 }
@@ -1359,7 +1441,7 @@ function setupWaypointUI() {
     const showCb = document.getElementById('showWaypoints');
     if (!showCb) {
         // Retry if DOM not ready yet
-        setTimeout(setupWaypointUI, 100);
+        trackTimeout(setTimeout(setupWaypointUI, 100));
         return;
     }
 
@@ -1368,7 +1450,7 @@ function setupWaypointUI() {
     showCb.checked = false;
 
     // Change handler to update autopilot flag and visual group (admin-only)
-    showCb.addEventListener('change', (e) => {
+    listen(showCb, 'change', (e) => {
         if (!adminMode) {
             // Non-admin: revert checkbox and ignore
             e.preventDefault();
@@ -1386,7 +1468,7 @@ function setupWaypointUI() {
 
 // Setup waypoint UI when DOM is ready
 if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', setupWaypointUI);
+    listen(document, 'DOMContentLoaded', setupWaypointUI);
 } else {
     setupWaypointUI();
 }
@@ -1399,7 +1481,7 @@ function setupAdminUI() {
 
     if (!pwdInput || !loginBtn) {
         // Retry if DOM not ready yet
-        setTimeout(setupAdminUI, 100);
+        trackTimeout(setTimeout(setupAdminUI, 100));
         return;
     }
 
@@ -1416,7 +1498,7 @@ function setupAdminUI() {
         }
     }
 
-    loginBtn.addEventListener('click', () => {
+    listen(loginBtn, 'click', () => {
         // If already in admin mode, clicking the button locks (disables) admin mode
         if (adminMode) {
             adminMode = false;
@@ -1449,7 +1531,7 @@ function setupAdminUI() {
     });
 
     // Allow Enter to submit password
-    pwdInput.addEventListener('keypress', (e) => {
+    listen(pwdInput, 'keypress', (e) => {
         if (e.key === 'Enter') {
             loginBtn.click();
         }
@@ -1461,7 +1543,7 @@ function setupAdminUI() {
 
 // Setup admin UI when DOM is ready
 if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', setupAdminUI);
+    listen(document, 'DOMContentLoaded', setupAdminUI);
 } else {
     setupAdminUI();
 }
@@ -2917,6 +2999,10 @@ function updateAutopilot(deltaTime) {
         if (autopilot.currentWaypointIndex >= autopilot.waypoints.length) {
             console.log("✅ Route complete! All waypoints reached.");
             autopilot.enabled = false;
+            if (!destinationEmitted && typeof emit === 'function') {
+                destinationEmitted = true;
+                emit('destinationReached');
+            }
             return;
         }
         
@@ -3006,7 +3092,8 @@ function updateAutopilot(deltaTime) {
 }
 
 function animate() {
-    requestAnimationFrame(animate);
+    if (cleanup.stopped) return;
+    cleanup.rafId = requestAnimationFrame(animate);
 
     const currentTime = performance.now();
     let deltaTime = (currentTime - lastTime) / 1000;
@@ -3107,21 +3194,24 @@ function animate() {
 async function loadMapData() {
     const statusEl = document.getElementById('mapStatus');
     try {
-        statusEl.textContent = "Loading Fremont map...";
+        if (cleanup.stopped) return;
+        if (statusEl) statusEl.textContent = "Loading Fremont map...";
         console.log("Loading map data...");
         const response = await fetch('/api/map_data');
+        if (cleanup.stopped) return;
         if (!response.ok) {
             throw new Error('Failed to load map data');
         }
         
         mapData = await response.json();
+        if (cleanup.stopped) return;
         console.log(`Loaded ${mapData.roads.length} road segments and ${mapData.buildings.length} buildings`);
         
-        statusEl.textContent = "Rendering roads...";
+        if (statusEl) statusEl.textContent = "Rendering roads...";
         // Render roads
         renderRoads(mapData.roads);
         
-        statusEl.textContent = "Rendering buildings...";
+        if (statusEl) statusEl.textContent = "Rendering buildings...";
         // Render buildings (pass roads so buildings on main roads are culled)
         renderBuildings(mapData.buildings, mapData.roads);
 
@@ -3130,11 +3220,11 @@ async function loadMapData() {
         removeBuildingAtCoord(-82, -373.5, 0.6);
         
         // Traffic lights initialization
-        statusEl.textContent = "Initializing traffic lights...";
+        if (statusEl) statusEl.textContent = "Initializing traffic lights...";
         initializeTrafficLights(mapData.roads, mapData.buildings);
 
         // AI cars initialization
-        statusEl.textContent = "Initializing AI cars...";
+        if (statusEl) statusEl.textContent = "Initializing AI cars...";
         initializeAICars();
 
         // Debug: optionally show node markers (comment out for production)
@@ -3145,8 +3235,10 @@ async function loadMapData() {
         vehicle.z = 0;
         carGroup.position.set(0, 0, 0);
         
-        statusEl.textContent = `✅ Map loaded: ${mapData.roads.length} roads, ${mapData.buildings.length} buildings`;
-        statusEl.style.color = "#4caf50";
+        if (statusEl) {
+            statusEl.textContent = `✅ Map loaded: ${mapData.roads.length} roads, ${mapData.buildings.length} buildings`;
+            statusEl.style.color = "#4caf50";
+        }
         
         console.log("Map data loaded and rendered");
         
@@ -3154,8 +3246,10 @@ async function loadMapData() {
         checkAndLoadRoute();
     } catch (error) {
         console.error("Error loading map data:", error);
-        statusEl.textContent = "⚠️ Map loading failed - simulator running without map";
-        statusEl.style.color = "#ff4444";
+        if (statusEl) {
+            statusEl.textContent = "⚠️ Map loading failed - simulator running without map";
+            statusEl.style.color = "#ff4444";
+        }
         // Continue without map data
     }
 }
@@ -5497,6 +5591,7 @@ function removeBuildingAtCoord(x, z, tolerance = 50.0) {
 // Start animation loop immediately (for vehicle controls)
 let animationStarted = false;
 function startAnimation() {
+    if (cleanup.stopped) return;
     if (!animationStarted) {
         animationStarted = true;
         animate();
@@ -5510,3 +5605,83 @@ loadMapData().then(() => {
     console.error("Map loading failed, starting simulator without map:", error);
     startAnimation();
 });
+
+function disposeMaterial(material) {
+    if (!material) return;
+    if (Array.isArray(material)) {
+        material.forEach(disposeMaterial);
+        return;
+    }
+    for (const key of Object.keys(material)) {
+        const value = material[key];
+        if (value && value.isTexture) {
+            value.dispose();
+        }
+    }
+    if (typeof material.dispose === 'function') {
+        material.dispose();
+    }
+}
+
+function disposeSceneResources(targetScene) {
+    if (!targetScene) return;
+    targetScene.traverse((obj) => {
+        if (obj.geometry) {
+            obj.geometry.dispose();
+        }
+        if (obj.material) {
+            disposeMaterial(obj.material);
+        }
+    });
+    while (targetScene.children.length > 0) {
+        targetScene.remove(targetScene.children[0]);
+    }
+}
+
+function stop() {
+    if (cleanup.stopped) return;
+    cleanup.stopped = true;
+
+    if (cleanup.rafId) {
+        cancelAnimationFrame(cleanup.rafId);
+        cleanup.rafId = null;
+    }
+
+    cleanup.timeouts.forEach((id) => clearTimeout(id));
+    cleanup.timeouts = [];
+
+    cleanup.disposers.forEach((dispose) => {
+        try {
+            dispose();
+        } catch (error) {
+            // ignore
+        }
+    });
+    cleanup.disposers = [];
+
+    const oscEl = document.getElementById('oscillationStatus');
+    if (oscEl) oscEl.remove();
+
+    if (renderer && renderer.domElement && renderer.domElement.parentNode) {
+        renderer.domElement.parentNode.removeChild(renderer.domElement);
+    }
+
+    disposeSceneResources(scene);
+
+    try {
+        renderer.renderLists.dispose();
+        renderer.dispose();
+        renderer.forceContextLoss();
+    } catch (error) {
+        // ignore
+    }
+
+    trafficLights = [];
+    mapData = null;
+    mapCenter = { x: 0, z: 0 };
+    aiCars = [];
+    aiCarsGroup = null;
+}
+
+return { stop };
+}

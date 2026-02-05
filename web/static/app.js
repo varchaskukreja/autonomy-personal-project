@@ -1,3 +1,58 @@
+import { Simulator } from './simulator.js';
+
+const AppState = {
+    LANDING: 'LANDING',
+    RUNNING: 'RUNNING',
+    ARRIVED: 'ARRIVED'
+};
+
+let currentState = AppState.LANDING;
+const simulator = new Simulator();
+
+const landingView = document.getElementById('landingView');
+const simulatorRoot = document.getElementById('simulatorRoot');
+const arrivalOverlay = document.getElementById('arrivalOverlay');
+const exitJourneyBtn = document.getElementById('exitJourneyBtn');
+const newRouteBtn = document.getElementById('newRouteBtn');
+const simulatorContainer = document.getElementById('container');
+
+function setState(nextState) {
+    currentState = nextState;
+    if (landingView) landingView.classList.toggle('hidden', nextState !== AppState.LANDING);
+    if (simulatorRoot) simulatorRoot.classList.toggle('hidden', nextState === AppState.LANDING);
+    if (arrivalOverlay) arrivalOverlay.classList.toggle('hidden', nextState !== AppState.ARRIVED);
+    document.body.classList.toggle('sim-running', nextState !== AppState.LANDING);
+}
+
+function startSimulation() {
+    setState(AppState.RUNNING);
+    simulator.start({ container: simulatorContainer });
+}
+
+function exitSimulation() {
+    simulator.stop();
+    setState(AppState.LANDING);
+}
+
+function restartSimulation() {
+    simulator.stop();
+    setState(AppState.RUNNING);
+    simulator.start({ container: simulatorContainer });
+}
+
+simulator.on('destinationReached', () => {
+    setState(AppState.ARRIVED);
+});
+
+if (exitJourneyBtn) {
+    exitJourneyBtn.addEventListener('click', exitSimulation);
+}
+if (newRouteBtn) {
+    newRouteBtn.addEventListener('click', restartSimulation);
+}
+
+setState(AppState.LANDING);
+
 // Autocomplete functionality
 let autocompleteTimeout = null;
 
@@ -235,7 +290,7 @@ function displayResults(latlonData, routeData) {
     
     // Add click handler for simulator launch button
     document.getElementById('launchSimulatorBtn').addEventListener('click', function() {
-        window.location.href = '/simulator';
+        startSimulation();
     });
 
     resultsDiv.classList.remove('hidden');
@@ -349,4 +404,3 @@ if (randomRouteBtn) {
         }
     });
 }
-
