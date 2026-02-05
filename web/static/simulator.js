@@ -55,6 +55,12 @@ if (!containerEl) {
     throw new Error('Simulator container element not found');
 }
 containerEl.innerHTML = '';
+const loadingEl = document.getElementById('simLoadingOverlay');
+
+function setLoadingVisible(visible) {
+    if (!loadingEl) return;
+    loadingEl.classList.toggle('hidden', !visible);
+}
 
 const cleanup = {
     disposers: [],
@@ -81,6 +87,7 @@ function trackTimeout(id) {
 }
 
 let destinationEmitted = false;
+setLoadingVisible(true);
 
 // Scene setup
 const scene = new THREE.Scene();
@@ -3195,6 +3202,7 @@ async function loadMapData() {
     const statusEl = document.getElementById('mapStatus');
     try {
         if (cleanup.stopped) return;
+        setLoadingVisible(true);
         if (statusEl) statusEl.textContent = "Loading Fremont map...";
         console.log("Loading map data...");
         const response = await fetch('/api/map_data');
@@ -3241,6 +3249,7 @@ async function loadMapData() {
         }
         
         console.log("Map data loaded and rendered");
+        setLoadingVisible(false);
         
         // Check for route in localStorage and start autopilot if available
         checkAndLoadRoute();
@@ -3250,6 +3259,7 @@ async function loadMapData() {
             statusEl.textContent = "⚠️ Map loading failed - simulator running without map";
             statusEl.style.color = "#ff4444";
         }
+        setLoadingVisible(false);
         // Continue without map data
     }
 }
@@ -5681,6 +5691,7 @@ function stop() {
     mapCenter = { x: 0, z: 0 };
     aiCars = [];
     aiCarsGroup = null;
+    setLoadingVisible(false);
 }
 
 return { stop };
