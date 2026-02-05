@@ -117,15 +117,15 @@ const INTERSECTION_THRESHOLD = 3.0; // meters - coordinates within this distance
 
 // Road type to width mapping (must match renderRoads)
 const ROAD_TYPE_WIDTHS = {
-    'motorway': 12,
-    'trunk': 10,
-    'primary': 8,
-    'secondary': 7,
-    'tertiary': 6,
-    'residential': 5,
-    'unclassified': 5,
-    'service': 4,
-    'living_street': 5
+    'motorway': 12*2,
+    'trunk': 10*2,
+    'primary': 8*2,
+    'secondary': 7*2,
+    'tertiary': 6*2,
+    'residential': 5*2,
+    'unclassified': 5*2,
+    'service': 4*2,
+    'living_street': 5*2
 };
 
 // Vehicle state (bicycle model)
@@ -3512,15 +3512,15 @@ function renderRoads(roads) {
 function renderRoads(roads) {
     // Road type styles - unified color, different widths only
     const roadTypeStyles = {
-        'motorway': { width: 12 },
-        'trunk': { width: 10 },
-        'primary': { width: 8 },
-        'secondary': { width: 7 },
-        'tertiary': { width: 6 },
-        'residential': { width: 5 },
-        'unclassified': { width: 5 },
-        'service': { width: 4 },
-        'living_street': { width: 5 }
+        'motorway': { width: 12*1.5 },
+        'trunk': { width: 10*1.5 },
+        'primary': { width: 8*1.5 },
+        'secondary': { width: 7*1.5 },
+        'tertiary': { width: 6*1.5 },
+        'residential': { width: 5*1.5 },
+        'unclassified': { width: 5*1.5 },
+        'service': { width: 4*1.5 },
+        'living_street': { width: 5*1.5 }
     };
     
     // Group roads by type for batching
