@@ -221,13 +221,7 @@ Jump to addresses or lat/lon coordinates, optional heading.
 
 ## Contributing
 
-Research/educational project. Feedback, suggestions, and contributions welcome.
-
----
-
-## License
-
-[Specify license here]
+Research/educational personal project. Feedback, suggestions, and contributions welcome.
 
 ---
 
