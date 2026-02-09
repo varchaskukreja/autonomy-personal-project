@@ -1,5 +1,0 @@
-Optimal Rotation: 0.00 degrees
-Optimal Translation X: 0.00 meters
-Optimal Translation Z: 0.00 meters
-Intersections: 730/9880
-Intersection Rate: 7.39%

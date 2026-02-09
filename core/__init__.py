@@ -1,4 +1,4 @@
 """
-Core routing and graph building modules.
+ routing & graph building modules
 """
 

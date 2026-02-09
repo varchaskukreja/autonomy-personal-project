@@ -4,6 +4,8 @@ Coordinate Alignment Analysis - Highly Optimized with Translation Support
 This module finds optimal rotation AND translation to minimize building-road intersections.
 Optimized for scanning full 360° efficiently.
 
+
+
 Key optimizations:
 - Vectorized operations using NumPy
 - Efficient spatial indexing with R-tree or grid

@@ -14,7 +14,7 @@ import sys
 project_root = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, project_root)
 
-from core.coordinate_alignment import analyze_alignment_optimized, calculate_map_rotation
+from legacy.coordinate_alignment import analyze_alignment_optimized, calculate_map_rotation
 from core.graph_builder import extract_map_data_for_rendering
 
 

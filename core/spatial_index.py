@@ -4,6 +4,11 @@ import numpy as np
 #has the KD-tree & finding the nearest node
 
 
+"""
+Implements a custom Dijkstra shortest‑path algorithm over the road graph.
+ It is imported and used by app.py, so it’s part of the final runtime.
+"""
+
 def build_kd_tree(nodes_dict):
     """
     Build a KD-tree from node coordinates.

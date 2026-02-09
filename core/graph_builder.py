@@ -5,6 +5,10 @@ import matplotlib.pyplot as plt
 from typing import List, Tuple, Dict
 
 
+"""
+Parses OSM data, builds the NetworkX road graph. Imported and used by app.py, so it’s part of the final runtime.
+"""
+
 def haversine_distance(lat1, lon1, lat2, lon2):
     """
     Calculate the great circle distance between two points on Earth
@@ -336,7 +340,7 @@ def path_to_coordinates(path: List[int], nodes_dict: dict) -> List[Tuple[float, 
     
     return coordinates
 
-
+# note: this was for debugging mostly, can be ignored
 def visualize_graph(graph, nodes_dict, path=None):
     """
     Visualize the road graph using matplotlib.
