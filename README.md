@@ -1,241 +1,123 @@
-# Autonomous Routing & Simulation Platform (Fremont, CA)
+# Browser-Based Autonomous Driving Simulator
 
-A comprehensive Flask-based web application for autonomous vehicle routing and 3D simulation using OpenStreetMap data, Dijkstra's algorithm, and Three.js for real-time visualization. Features realistic traffic simulation with AI-controlled vehicles, traffic light systems, and collision avoidance.
+A full-stack autonomous driving simulation platform that converts real-world map data into a live, interactive 3D driving environment with rule-based vehicle autonomy.
 
----
-
-## Current Scope & Features
-
-### 🗺️ Route Planning & Navigation
-
-* **Address Autocomplete**: Real-time suggestions via Nominatim API
-* **Geocoding**: Convert addresses to lat/lon coordinates
-* **KD-Tree Spatial Indexing**: Efficient nearest node lookup (O(log N))
-* **Dijkstra's Algorithm**: Custom shortest-path routing with haversine distance
-* **Route Visualization**: Distance, node count, and coordinate polyline
+This project demonstrates end-to-end ownership of geospatial data processing, graph algorithms, backend systems, and real-time frontend simulation, without relying on pretrained ML models or black-box libraries.
 
 ---
 
-### 🎮 3D Simulator Environment
+## 🏎️ Overview
 
-* **Three.js WebGL Rendering**: Smooth 60 FPS browser-based visualization
-* **Real-World Map Data**: Fremont, CA roads & buildings from OSM
-* **Scaled Road Rendering**: Road widths 4–12m based on type
-* **Building Visualization**: Extruded polygons with varied heights
-* **Dynamic Ground Plane**: Automatically sized to map bounds
-* **Procedural Nebula Sky**: Animated stars and atmospheric clouds
+This simulator allows users to enter real-world start and destination addresses, computes a drivable route using **OpenStreetMap (OSM)** data, and visualizes the journey in a browser-based 3D environment. The vehicle follows the route autonomously while obeying traffic lights, avoiding other vehicles, and maintaining lane discipline.
+
+The system is designed to be **deterministic, interpretable, and debuggable**, prioritizing classical algorithms and control logic over opaque machine learning approaches.
 
 ---
 
-### 🚗 Vehicle Physics & Controls
+## ✨ Key Features
 
-* **Bicycle Model Physics**: Realistic acceleration, braking, and steering dynamics
-* **Manual Driving Controls**: WASD keys for movement
-* **SlowRoads.io-Style Animations**: Tilting and wheel rotation on curves
-* **Speed-Based Turning**: Automatic speed reduction on sharp turns
-* **Steering Constraints**: Angular velocity & minimum turning radius limits
-* **Teleportation System**: Jump to any address or coordinates
+* **Real-world Routing:** Parses OSM data, constructs a directed road graph, and computes shortest paths via a custom Dijkstra implementation.
+* **Autonomous Vehicle Control:** Steering and throttle computed from waypoint geometry with traffic light detection and dynamic collision avoidance.
+* **Interactive 3D Simulation:** Browser-based visualization using **Three.js** with procedurally generated roads, terrain, and buildings.
+* **Full-Stack Architecture:** Python backend for routing and spatial indexing with a Flask API serving a JavaScript-driven frontend.
 
 ---
 
-### 🤖 Autopilot System
+## 🛠️ Tech Stack
 
-* **Pure Pursuit Steering**: Lookahead-based path following
-* **Waypoint Navigation**: Automatic route traversal
-* **Curvature-Based Speed Control**: Adjust speed based on path curvature
-* **Steering Oscillation Damping**: Prevents zigzag behavior
-* **Route Integration**: Connects route planner directly to autopilot
+### Backend
 
----
+* **Language:** Python
+* **Framework:** Flask
+* **Data:** OpenStreetMap (OSM), Nominatim Geocoding API
+* **Logic:** Custom graph construction + spatial indexing
 
-### 🚦 Traffic Light System
+### Frontend
 
-* **Automatic Intersection Detection**: Identifies intersections from road network
-* **Multi-Phase Signal Timing**: NS/EW straight & left-turn phases
-* **Signal State Machine**: GREEN → YELLOW → RED cycling
-* **Left-Turn Arrows**: Dedicated left-turn signals
-* **Traffic Light Compliance**: Vehicles detect and obey lights
+* **Engine:** Three.js (WebGL)
+* **Language:** JavaScript (ES6)
+* **Styling:** HTML5 / CSS3
 
-  * Approach detection with scoring
-  * Yellow light logic (stop vs. proceed)
-  * Smooth deceleration curves
+### Algorithms & Data Structures
 
----
-
-### 🚙 AI Traffic System
-
-* **Autonomous AI Vehicles**: Up to 8 AI cars sharing the road
-* **Relevance-Based Spawning**: AI spawns near ego on main roads
-* **Local Path Planning**: AI follows roads and decides turns at intersections
-* **Intersection Branching**: Weighted random decisions (50% straight, 30% right, 20% left)
-* **Traffic Light Obedience**: AI respects traffic signals
-* **Lifecycle Management**: AI despawns when out of camera range, path completed, or lifetime exceeded
+* **Directed Graphs:** For road network representation
+* **Dijkstra’s Algorithm:** Manual implementation for shortest pathing
+* **KD-Tree:** For  nearest-node spatial lookups
+* **Deterministic Control:** Rule-based steering and acceleration logic
 
 ---
 
-### 🚧 Collision Avoidance System
+## 📂 Project Structure
 
-* **Forward Detection Cone**: 50m range, 60° angle
-* **Safe Following Distance**: 12m minimum
-* **Emergency Braking**: Aggressive braking < 6m
-* **Gradual Slowdown**: Proportional to distance
-* **Multi-Vehicle Awareness**: Ego and AI vehicles avoid collisions
-* **Approach Detection**: Tracks relative velocity
+```text
+.
+├── core/                       # Geospatial processing & routing engine (Python)
+│   ├── graph_builder.py        # OSM → directed road graph construction
+│   ├── routing.py              # Custom Dijkstra implementation
+│   └── spatial_index.py        # KD-tree nearest-node lookup
+│
+├── data/
+│   └── osm/
+│       ├── fremont_raw.osm     # Raw OSM XML extract
+│       └── fremont.osm         # Cleaned / filtered OSM data
+│
+├── web/                        # Web application & simulation runtime
+│   ├── app.py                  # Flask app entry point & API routes
+│   ├── static/
+│   │   ├── app.js              # Frontend UI logic
+│   │   ├── simulator.js        # Three.js simulation + autonomy loop
+│   │   └── style.css           # UI styling
+│   └── templates/
+│       ├── index.html          # Route planner UI
+│       └── simulator.html      # 3D simulation interface
+│
+├── requirements.txt
+└── README.md
+
+```
 
 ---
 
-### 📹 Camera Systems
+## ⚙️ System Execution Flow
 
-* **Follow Camera**: Smooth third-person tracking
-* **Admin Camera Mode**: Free movement for debugging
-
-  * WASD/Arrow keys + Q/E for X-Y-Z movement
-  * Shift for fast movement
-  * Top-down view toggle
-  * Spacebar resets vehicle & camera
+1. **Backend Initialization:** OSM data is parsed, a directed road graph is constructed, and a KD-tree is built for coordinate snapping.
+2. **Route Request:** User inputs are geocoded via Nominatim, snapped to graph nodes, and the shortest path is computed and sent to the frontend.
+3. **Simulation Launch:** Three.js initializes the 3D world, procedurally generating the environment and spawning traffic.
+4. **Runtime Loop:** Every frame, the vehicle updates steering based on waypoint geometry, traffic light states, and proximity to other AI vehicles.
+5. **Reset & Relaunch:** The state is torn down on reset, allowing for immediate new route computation without reloading backend assets.
 
 ---
 
-### 🛠️ Debug & Development Tools
+## 🧠 Autonomy Design & Decisions
 
-* Traffic light scoring visuals
-* Waypoint markers toggle
-* Spawn location markers
-* Console logging for AI & traffic decisions
+The vehicle autonomy is rule-based to ensure **predictable behavior** and **clear reasoning** during code reviews.
+
+* **Path Following:** Lookahead-based steering.
+* **Traffic Logic:** Full stops at red lights and conditional slowdowns at yellow.
+* **Collision Avoidance:** Dynamic deceleration based on AI traffic proximity.
+* **Why No ML?** Prioritized interpretability and engineering judgment over statistical approximation.
+* **Why Three.js?** Reduced setup complexity compared to heavy simulators like CARLA, improving accessibility.
 
 ---
 
-## Setup
+## 🚀 How to Run
 
-### 1. Install Dependencies
-
+1. **Install dependencies:**
 ```bash
 pip install -r requirements.txt
+
 ```
 
-Or individually:
 
+2. **Start the server:**
 ```bash
-pip install Flask requests scipy networkx numpy matplotlib osmium
-```
-
-### 2. Ensure OSM Data File
-
-Place `fremont_raw.osm` in `data/osm/`. Download options:
-
-* [OpenStreetMap](https://www.openstreetmap.org/)
-* [Geofabrik California Extracts](https://download.geofabrik.de/north-america/us/california.html)
-
-### 3. Run the Application
-
-```bash
-python3 -m web.app
-# or
-cd web
-python3 app.py
-```
-
-Server startup includes:
-
-* Loading & parsing OSM graph (30–60s first time)
-* Building NetworkX graph & KD-tree
-* Extracting 3D map data
-* Flask server at `http://127.0.0.1:5000`
-
-### 4. Open in Browser
-
-Navigate to `http://127.0.0.1:5000`
-
----
-
-## Usage
-
-### Route Planning
-
-1. Enter start/end addresses in Fremont, CA
-2. Select autocomplete suggestions
-3. Click "Compute Route" for shortest path
-4. Click "Drive Route" to open simulator with autopilot
-
-### 3D Simulator
-
-* **Manual Driving**: W/A/S/D for movement, Space to reset
-* **Admin Camera Mode (Tab)**:
-
-  * WASD/Arrow keys + Q/E for movement
-  * Shift for fast movement
-  * T for top-down view
-  * Space resets vehicle & camera
-
-### Teleportation
-
-Jump to addresses or lat/lon coordinates, optional heading.
-
----
-
-## API Endpoints
-
-| Endpoint         | Method | Description                      |
-| ---------------- | ------ | -------------------------------- |
-| /                | GET    | Route planning UI                |
-| /autocomplete?q= | GET    | Address suggestions              |
-| /get_latlon      | POST   | Convert addresses to coordinates |
-| /compute_route   | POST   | Dijkstra shortest path           |
-| /simulator       | GET    | 3D simulator interface           |
-| /api/map_data    | GET    | Roads & buildings JSON           |
-| /api/teleport    | POST   | Teleport vehicle                 |
-
----
-
-## Project Structure
+python web/app.py
 
 ```
-.
-├── core/                 # Routing & processing modules
-├── web/                  # Flask app & static files
-├── data/osm/             # OSM data
-├── legacy/               # Legacy scripts
-├── README.md
-└── requirements.txt
-```
+
+
+3. **Launch:** Open the provided local URL (usually `http://127.0.0.1:5000`) and enter a start/end address.
 
 ---
 
-## Technical Details
-
-* **Graph**: NetworkX DiGraph, haversine edge weights
-* **OSM → Simulator Coordinates**: Local Cartesian projection
-* **AI Cars Config**: Max 8, spawn near ego, collision & despawn logic
-* **Traffic Light Timings**: Straight Green 10s, Left Green 5s, Yellow 2s
-* **Optimizations**: Graph & KD-tree caching, batched rendering, spatial filtering for AI collision
-
----
-
-## Browser Requirements
-
-* WebGL-enabled modern browser (Chrome, Firefox, Safari, Edge)
-* ES6 modules
-* ≥4GB RAM recommended
-
----
-
-## Contributing
-
-Research/educational project. Feedback, suggestions, and contributions welcome.
-
----
-
-## License
-
-[Specify license here]
-
----
-
-## Acknowledgments
-
-* OpenStreetMap contributors
-* Nominatim API
-* Three.js community
-* NetworkX & SciPy libraries
-
----
+Please direct all inquiries to varchas@umich.edu. Thank you!
