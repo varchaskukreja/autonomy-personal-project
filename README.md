@@ -111,7 +111,7 @@ pip install -r requirements.txt
 
 2. **Start the server:**
 ```bash
-python web/app.py
+python3 -m web.app
 
 ```
 
