@@ -4,7 +4,7 @@ A full-stack autonomous driving simulation platform that converts real-world map
 
 This project demonstrates end-to-end ownership of geospatial data processing, graph algorithms, backend systems, and real-time frontend simulation, without relying on pretrained ML models or black-box libraries.
 
-FULL DOCUMENTATION AVAILABLE: [INSERT LINK HERE]
+FULL DOCUMENTATION + DEMO AVAILABLE: https://docs.google.com/document/d/1M6x9Wmv_5Q7r__BNDpPWw4lN3B13wMNRhdAbH1TBTkU/edit?usp=sharing
 ---
 
 ## 🏎️ Overview
