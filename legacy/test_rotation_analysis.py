@@ -5,7 +5,8 @@ Test script for optimized coordinate alignment with rotation + translation.
 Usage:
     python3 test_rotation_analysis.py                    # Rotation only (fast)
     python3 test_rotation_analysis.py --translation      # Rotation + translation (slower but thorough)
-"""
+-- project final
+    """
 
 import os
 import sys

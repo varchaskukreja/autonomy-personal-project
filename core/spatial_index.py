@@ -7,6 +7,8 @@ import numpy as np
 """
 Implements a custom Dijkstra shortest‑path algorithm over the road graph.
  It is imported and used by app.py, so it’s part of the final runtime.
+
+ -- project final
 """
 
 def build_kd_tree(nodes_dict):

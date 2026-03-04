@@ -5,8 +5,9 @@ import matplotlib.pyplot as plt
 #ways and buildings.
 
 class MapHandler(osmium.SimpleHandler): 
-    """This class is used to extract roads and buildings from OSM data.
+    """This class is used to extract roads and buildings from OSM data. -- project final
     # It is a subclass of osmium.SimpleHandler, which is a base class for all OSM handlers."""
+    
     
     def __init__(self):
         super().__init__() #required for proper inheritance stuff (technicality)

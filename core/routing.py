@@ -29,6 +29,8 @@ def dijkstra_custom_algorithm(
     
     Raises:
         ValueError: If start or goal node is not in the graph
+
+        -- project final
     """
     # Safety checks: verify nodes exist in graph
     if start not in graph:

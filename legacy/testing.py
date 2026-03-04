@@ -161,3 +161,5 @@ coords = [
 print("lat,lng")
 for lat, lng in coords:
     print(f"{lat},{lng}")
+
+# project finalized
