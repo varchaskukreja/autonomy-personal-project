@@ -1,7 +1,6 @@
 import osmium
 import networkx as nx
 import numpy as np
-import matplotlib.pyplot as plt
 from typing import List, Tuple, Dict
 
 
@@ -313,6 +312,28 @@ def transform_map_data_for_rendering(map_data: Dict, center_lat: float, center_l
     }
 
 
+def build_graph_from_json(json_file: str):
+    """Load graph and nodes_dict from a pre-processed JSON file (no osmium needed)."""
+    import json as _json
+    with open(json_file) as f:
+        data = _json.load(f)
+    nodes_dict = {int(k): tuple(v) for k, v in data["nodes"].items()}
+    graph = nx.DiGraph()
+    for u, v, weight in data["edges"]:
+        graph.add_edge(u, v, weight=weight)
+    return graph, nodes_dict
+
+
+def load_map_data_from_json(json_file: str) -> Dict:
+    """Load pre-transformed map data from a JSON file (no osmium needed)."""
+    import json as _json
+    with open(json_file) as f:
+        data = _json.load(f)
+    if isinstance(data.get("center"), list):
+        data["center"] = tuple(data["center"])
+    return data
+
+
 def path_to_coordinates(path: List[int], nodes_dict: dict) -> List[Tuple[float, float]]:
     """
     Transform a list of OSM node IDs into an ordered list of (lat, lon) coordinates.
@@ -350,6 +371,7 @@ def visualize_graph(graph, nodes_dict, path=None):
         nodes_dict: Dictionary mapping node_id to (lat, lon)
         path: Optional list of node IDs representing a path to highlight in red
     """
+    import matplotlib.pyplot as plt
     plt.ioff()  # Turn off interactive mode to ensure plot displays
     plt.figure(figsize=(12, 12))
     

@@ -9,10 +9,9 @@ import math
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.graph_builder import (
-    build_graph, 
+    build_graph_from_json,
+    load_map_data_from_json,
     path_to_coordinates,
-    extract_map_data_for_rendering,
-    transform_map_data_for_rendering
 )
 from core.spatial_index import build_kd_tree, find_nearest_node
 from core.routing import dijkstra_custom_algorithm
@@ -33,36 +32,15 @@ map_center_lon = None  # Map center longitude (for coordinate transformation)
 def load_graph_data():
     """Load graph and build KD-tree on server startup."""
     global graph, nodes_dict, kd_tree, node_ids_list, map_data_cache, map_center_lat, map_center_lon
-    
-    # Get path to OSM file relative to project root
+
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    osm_path = os.path.join(project_root, "data", "osm", "fremont_raw.osm")
-    graph, nodes_dict = build_graph(osm_path)
-    
-    # Only include nodes that are actually in the graph (part of highway ways)
-    graph_nodes_dict = {node_id: nodes_dict[node_id] for node_id in graph.nodes() if node_id in nodes_dict}
+    graph, nodes_dict = build_graph_from_json(os.path.join(project_root, "data", "graph_data.json"))
+
+    graph_nodes_dict = {nid: nodes_dict[nid] for nid in graph.nodes() if nid in nodes_dict}
     kd_tree, node_ids_list, _ = build_kd_tree(graph_nodes_dict)
-    
-    # Extract map data for 3D rendering (uses existing RoadGraphHandler from graph_builder.py)
-    # Use existing RoadGraphHandler - same tested code that built the graph!
-    map_data = extract_map_data_for_rendering(osm_path)
-    
-    # Calculate center point
-    if map_data['nodes']:
-        lats = [lat for lat, lon in map_data['nodes'].values()]
-        lons = [lon for lat, lon in map_data['nodes'].values()]
-        center_lat = sum(lats) / len(lats)
-        center_lon = sum(lons) / len(lons)
-    else:
-        center_lat = 37.5483
-        center_lon = -121.9886
-    
-    # Store center coordinates globally for coordinate transformation
-    map_center_lat = center_lat
-    map_center_lon = center_lon
-    
-    # Transform to local coordinates
-    map_data_cache = transform_map_data_for_rendering(map_data, center_lat, center_lon)
+
+    map_data_cache = load_map_data_from_json(os.path.join(project_root, "data", "map_data.json"))
+    map_center_lat, map_center_lon = map_data_cache["center"]
 
 @app.route('/')
 def index():
