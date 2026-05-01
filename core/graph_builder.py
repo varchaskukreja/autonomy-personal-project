@@ -1,4 +1,3 @@
-import osmium
 import networkx as nx
 import numpy as np
 from typing import List, Tuple, Dict
@@ -37,62 +36,48 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     return distance
 
 
-class RoadGraphHandler(osmium.SimpleHandler):
-    """Handler to extract nodes and highway ways from OSM data for graph building."""
-    
-    def __init__(self, extract_buildings=False):
-        super().__init__()
-        self.nodes = {}  # Store node coordinates: {node_id: (lat, lon)}
-        self.highways = []  # Store highway ways: [(node_ids, oneway_tag, highway_type), ...]
-        self.buildings = []  # Store building ways: [(node_ids), ...] (only if extract_buildings=True)
-        self.extract_buildings = extract_buildings
-    
-    def node(self, n):
-        """Store node coordinates by ID."""
-        if n.location.valid():
-            self.nodes[n.id] = (n.location.lat, n.location.lon)
-    
-    def way(self, w):
-        """Extract ways tagged as highway and track oneway information."""
-        if 'highway' in w.tags:
-            highway_type = w.tags.get('highway', '')
-            
-            # Exclude non-vehicular highway types
-            excluded_types = {
-                'footway', 'cycleway', 'path', 'steps', 'pedestrian', 
-                'bridleway', 'bus_guideway', 'escape', 'raceway'
-            }
-            
-            # Only include vehicular roads
-            if highway_type not in excluded_types:
-                # Get node IDs for this way
-                node_ids = [node.ref for node in w.nodes]
-                
-                # Check for oneway tag
-                oneway = w.tags.get('oneway', 'no')
-                
-                # Only add if we have at least 2 nodes
-                if len(node_ids) >= 2:
-                    self.highways.append((node_ids, oneway, highway_type))
-        
-        # Extract buildings if requested (for 3D rendering)
-        if self.extract_buildings and 'building' in w.tags:
-            node_ids = [node.ref for node in w.nodes]
-            if len(node_ids) >= 3:  # Buildings need at least 3 nodes (polygon)
-                self.buildings.append(node_ids)
-
-
 def build_graph(osm_file):
     """
     Build a NetworkX directed graph from OSM file.
-    
+
     Args:
         osm_file: Path to the OSM file
-    
+
     Returns:
         tuple: (graph, nodes_dict) where graph is a NetworkX DiGraph
                and nodes_dict is {node_id: (lat, lon)}
     """
+    import osmium
+
+    class RoadGraphHandler(osmium.SimpleHandler):
+        def __init__(self, extract_buildings=False):
+            super().__init__()
+            self.nodes = {}
+            self.highways = []
+            self.buildings = []
+            self.extract_buildings = extract_buildings
+
+        def node(self, n):
+            if n.location.valid():
+                self.nodes[n.id] = (n.location.lat, n.location.lon)
+
+        def way(self, w):
+            if 'highway' in w.tags:
+                highway_type = w.tags.get('highway', '')
+                excluded_types = {
+                    'footway', 'cycleway', 'path', 'steps', 'pedestrian',
+                    'bridleway', 'bus_guideway', 'escape', 'raceway'
+                }
+                if highway_type not in excluded_types:
+                    node_ids = [node.ref for node in w.nodes]
+                    oneway = w.tags.get('oneway', 'no')
+                    if len(node_ids) >= 2:
+                        self.highways.append((node_ids, oneway, highway_type))
+            if self.extract_buildings and 'building' in w.tags:
+                node_ids = [node.ref for node in w.nodes]
+                if len(node_ids) >= 3:
+                    self.buildings.append(node_ids)
+
     # Parse OSM data
     handler = RoadGraphHandler()
     handler.apply_file(osm_file)
